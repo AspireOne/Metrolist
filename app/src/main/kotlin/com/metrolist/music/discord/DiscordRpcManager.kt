@@ -30,16 +30,26 @@ data class DiscordUser(
     val avatar: String?,
 )
 
+internal sealed interface ConnectionIntent {
+    data object EnsureConnected : ConnectionIntent
+    data class Resume(val sessionId: String, val sequence: Int) : ConnectionIntent
+    data object Identify : ConnectionIntent
+    data object ForceRefreshAndIdentify : ConnectionIntent
+}
+
+internal fun intentPriority(intent: ConnectionIntent): Int = when (intent) {
+    ConnectionIntent.EnsureConnected -> 0
+    is ConnectionIntent.Resume -> 1
+    ConnectionIntent.Identify -> 2
+    ConnectionIntent.ForceRefreshAndIdentify -> 3
+}
+
+internal fun mergeIntents(current: ConnectionIntent, incoming: ConnectionIntent): ConnectionIntent =
+    if (intentPriority(incoming) >= intentPriority(current)) incoming else current
+
 object DiscordRpcManager {
     private const val TAG = "DiscordSvc"
     private const val MAX_RECONNECT_ATTEMPTS = 7
-
-    private sealed interface ConnectionIntent {
-        data object EnsureConnected : ConnectionIntent
-        data class Resume(val sessionId: String, val sequence: Int) : ConnectionIntent
-        data object Identify : ConnectionIntent
-        data object ForceRefreshAndIdentify : ConnectionIntent
-    }
 
     private data class PendingConnectionRequest(
         var intent: ConnectionIntent,
@@ -937,16 +947,6 @@ object DiscordRpcManager {
             publishConnectionFailure(expectedEpoch, error)
         }
     }
-
-    private fun intentPriority(intent: ConnectionIntent): Int = when (intent) {
-        ConnectionIntent.EnsureConnected -> 0
-        is ConnectionIntent.Resume -> 1
-        ConnectionIntent.Identify -> 2
-        ConnectionIntent.ForceRefreshAndIdentify -> 3
-    }
-
-    private fun mergeIntents(current: ConnectionIntent, incoming: ConnectionIntent): ConnectionIntent =
-        if (intentPriority(incoming) >= intentPriority(current)) incoming else current
 
     fun disconnect() {
         Timber.tag(TAG).i("disconnect: closing gateway, clearing ready/authorized")

@@ -72,8 +72,8 @@ sealed interface GatewayEvent {
 class DiscordGateway(
     private val appId: String,
     private val externalScope: CoroutineScope,
+    private val webSocketFactory: WebSocket.Factory? = null,
 ) {
-
     private val _events = MutableSharedFlow<GatewayEvent>(
         replay = 0,
         extraBufferCapacity = 64,
@@ -129,7 +129,7 @@ class DiscordGateway(
         val request = Request.Builder().url(gatewayUrl).build()
         val listener = createListener(openDeferred, myId)
         val ws = try {
-            httpClient.newWebSocket(request, listener)
+            (webSocketFactory ?: httpClient).newWebSocket(request, listener)
         } catch (e: Throwable) {
             invalidateAttempt(myId, null)
             throw GatewayConnectionException(4000, null, e)
