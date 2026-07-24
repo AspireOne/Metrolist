@@ -121,12 +121,16 @@ android {
         val lastFmKey = localProperties.getProperty("LASTFM_API_KEY") ?: System.getenv("LASTFM_API_KEY") ?: ""
         val lastFmSecret = localProperties.getProperty("LASTFM_SECRET") ?: System.getenv("LASTFM_SECRET") ?: ""
 
-        // Override with your own Discord application's client ID in local.properties
-        // (key: DISCORD_APP_ID) or the DISCORD_APP_ID env var if you need OAuth2/Social SDK
-        // scopes your own Discord app is registered for.
+        // Requires your own Discord application's client ID in local.properties
+        // (key: DISCORD_APP_ID) or the DISCORD_APP_ID env var. No fallback: silently
+        // building against someone else's Discord app ID is worse than failing loudly.
         val discordAppId = localProperties.getProperty("DISCORD_APP_ID")?.takeIf { it.isNotBlank() }
             ?: System.getenv("DISCORD_APP_ID")?.takeIf { it.isNotBlank() }
-            ?: "1447278780795064401"
+            ?: throw GradleException(
+                "DISCORD_APP_ID is not set. Provide it via local.properties (key: DISCORD_APP_ID) " +
+                    "or the DISCORD_APP_ID env var -- register your own Discord application and use " +
+                    "its client ID."
+            )
 
         // Updater target repo (owner/name) for in-app update checks. Override in
         // local.properties (key: UPDATE_REPO) or the UPDATE_REPO env var to point the
