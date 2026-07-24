@@ -221,22 +221,31 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
             BASE=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts)
-            echo "tag=v${BASE}" >> "$GITHUB_OUTPUT"
+            TAG="v${BASE}"
           else
-            echo "tag=${{ steps.mirror.outputs.tag }}" >> "$GITHUB_OUTPUT"
+            TAG="${{ steps.mirror.outputs.tag }}"
           fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      # A given upstream tag's test results are immutable, so cache the pristine failure set
-      # keyed by that tag. Upstream ships with some permanently-failing unit tests, so the
-      # merged build's tests fail on essentially every run; without this cache we would
-      # rebuild the pristine baseline every time instead of once per upstream version.
+          # Keep a missing baseline non-fatal here: it is only required when the merged
+          # tests fail, and the test step below already fails closed in that case.
+          if ! COMMIT=$(git rev-parse -q --verify "${TAG}^{commit}" 2>/dev/null); then
+            COMMIT="unresolved"
+          fi
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+
+      # Cache the pristine failure set by both tag and resolved commit. Including the commit
+      # invalidates the cache if upstream moves a tag, while retaining the readable tag in
+      # the key. Upstream ships with some permanently-failing unit tests, so the merged
+      # build's tests fail on essentially every run; without this cache we would rebuild
+      # the pristine baseline every time instead of once per upstream release target.
       - name: Restore pristine baseline failures
         if: steps.release.outputs.proceed == 'true'
         id: baseline_cache
         uses: actions/cache@v4
         with:
           path: pristine_fails.txt
-          key: pristine-fails-${{ steps.baseline.outputs.tag }}
+          key: pristine-fails-${{ steps.baseline.outputs.tag }}-${{ steps.baseline.outputs.commit }}
 
       # Gate releases on unit tests, differentially in BOTH modes: run the merged (fork)
       # tests, and tolerate a failure only if the SAME test+type also fails on the pristine
@@ -417,8 +426,9 @@ jobs:
             {
               echo "Release of version $VERSION"
               echo ""
-              git log "$(git describe --tags --abbrev=0 2>/dev/null || echo "HEAD~10")..HEAD" \
-                --pretty=format:"- %s" --no-merges | head -10 || echo "- Initial release"
+              git log --max-count=10 \
+                "$(git describe --tags --abbrev=0 2>/dev/null || echo "HEAD~10")..HEAD" \
+                --pretty=format:"- %s" --no-merges || echo "- Initial release"
             } > release_notes.md
           fi
 
