@@ -1,0 +1,78 @@
+name: Keepalive
+
+# GitHub automatically disables scheduled workflows in a *public* repository when
+# "no repository activity has occurred in 60 days" -- which would silently stop the
+# nightly upstream mirror in `fork-release.yml`. You get one easily-missed email and
+# then nothing runs until someone manually re-enables it.
+#
+# Upstream (MetrolistGroup/Metrolist) moves fast enough that the mirror normally
+# pushes merge commits well inside 60 days, so this job is insurance, not the main
+# mechanism. It stays cheap by doing nothing unless `main` has actually gone quiet.
+#
+# GitHub has never documented what counts as "activity", so this takes both routes:
+#   1. An empty commit on the default branch. Commits are the one thing the community
+#      consistently observes to reset the counter (creating tags/issues/PRs does not).
+#   2. Calling the workflow "enable" API on the already-enabled workflows, which is
+#      reported to reset the inactivity counter as a side effect. Unverified by docs,
+#      so it is best-effort and never fails the run.
+on:
+  schedule:
+    # Weekly, not once-per-N-days-near-the-deadline. A single skipped or failed run
+    # must not be able to burn the whole margin -- and GitHub itself drops scheduled
+    # runs under load, so a 50-day cron with 10 days of slack is a real risk.
+    - cron: "0 5 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Need real history to read the timestamp of the last commit on main.
+          fetch-depth: 0
+
+      - name: Push an empty commit if main has gone quiet
+        env:
+          # Well inside the 60-day limit, so several consecutive failures are survivable.
+          MAX_QUIET_DAYS: "30"
+        run: |
+          set -euo pipefail
+
+          LAST=$(git log -1 --format=%ct)
+          AGE_DAYS=$(( ( $(date +%s) - LAST ) / 86400 ))
+          echo "Last commit on main: $(git log -1 --format='%h %ci %an') (${AGE_DAYS}d ago)"
+
+          if [ "$AGE_DAYS" -lt "$MAX_QUIET_DAYS" ]; then
+            echo "Under ${MAX_QUIET_DAYS}d of quiet -- nothing to do."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # `[skip ci]` is belt and braces: pushes authenticated with GITHUB_TOKEN do
+          # not trigger workflows at all, so this already cannot fire a personal-mode
+          # release in fork-release.yml. The marker keeps that true if this workflow is
+          # ever switched to a PAT.
+          BODY="No repository activity in ${AGE_DAYS} days. Empty commit to stop GitHub from"
+          BODY="${BODY} auto-disabling the scheduled upstream mirror after 60 days of inactivity."
+          git commit --allow-empty -m "chore: keepalive [skip ci]" -m "$BODY"
+          git push origin HEAD:main
+
+      - name: Reset the inactivity counter via the workflow enable API
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          for wf in fork-release.yml keepalive.yml; do
+            echo "Enabling ${wf}"
+            gh api -X PUT \
+              "repos/${{ github.repository }}/actions/workflows/${wf}/enable" \
+              --silent || echo "::warning::enable failed for ${wf} (best-effort)"
+          done
