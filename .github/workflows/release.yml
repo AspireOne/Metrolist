@@ -16,7 +16,10 @@ name: Sync, Build, and Release
 # compares (it reads the release `name`, not the tag).
 on:
   schedule:
-    - cron: "0 */6 * * *"
+    # Daily upstream mirror check. GitHub cron is UTC-only (no DST), so this fixed
+    # UTC hour maps to 03:00 Europe/Prague in summer (CEST, UTC+2) and 02:00 in
+    # winter (CET, UTC+1) -- a harmless one-hour drift for a nightly release job.
+    - cron: "0 1 * * *"
   push:
     branches:
       - "main"
