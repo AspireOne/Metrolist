@@ -1,2 +1,0 @@
-# Our CI workflows are wholly ours; never let an upstream merge overwrite them.
-/.github/workflows/** merge=ours
