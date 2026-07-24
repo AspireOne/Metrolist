@@ -1,65 +1,92 @@
-name: Sync, Build, and Release
-
-# Two modes, one workflow:
-#  - schedule / workflow_dispatch -> "mirror" mode: pull in the latest upstream
-#    (MetrolistGroup/Metrolist) release and publish it, with our patches on top.
-#  - push to main -> "personal" mode: publish an interim release of our own commits.
-#
-# The merge push in mirror mode uses the default GITHUB_TOKEN, whose pushes never
-# trigger further workflow runs -- so a mirror run can never recursively trigger a
-# personal-mode run of this same workflow.
-#
-# Our release git tags are prefixed "fork-v..." so they never collide with upstream's
-# "vX.Y.Z" tags. Colliding would break `git fetch upstream --tags` on the next run,
-# since our tag points at a merged commit and upstream's points at a pristine one.
-# The release *title* stays the bare numeric version, which is what the in-app updater
-# compares (it reads the release `name`, not the tag).
+name: Bump to new version
 on:
-  schedule:
-    # Daily upstream mirror check. GitHub cron is UTC-only (no DST), so this fixed
-    # UTC hour maps to 03:00 Europe/Prague in summer (CEST, UTC+2) and 02:00 in
-    # winter (CET, UTC+1) -- a harmless one-hour drift for a nightly release job.
-    - cron: "0 1 * * *"
   push:
     branches:
       - "main"
-  workflow_dispatch: {}
-
-permissions:
-  contents: write
-
-# Serialize all runs: never let two runs (push/push or push/schedule) race on version
-# numbers, tags, or releases. Queue rather than cancel -- cancelling mid-publish could
-# leave a half-created release.
-concurrency:
-  group: sync-build-release
-  cancel-in-progress: false
+    paths:
+      - "app/build.gradle.kts"
+  workflow_dispatch:
 
 jobs:
-  release:
+  check-version:
+    if: "!contains(github.ref, 'refs/tags')"
     runs-on: ubuntu-latest
-    env:
-      # Fork identity, defined once and reused by the build and the verification steps.
-      FORK_APP_ID: com.metrolist.music.aspireone
-      FORK_APP_NAME: Metrolist++
+    outputs:
+      version_changed: ${{ steps.check_version.outputs.version_changed }}
+      new_version: ${{ steps.check_version.outputs.new_version }}
+      version_code: ${{ steps.check_version.outputs.version_code }}
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           submodules: recursive
-          # Do not persist the write-capable token in .git/config: the merged upstream
-          # build code (Gradle scripts/plugins) runs in this workspace and could otherwise
-          # read it. The token is supplied explicitly only for the push step below; all
-          # fetches here are from public repos and need no credentials.
-          persist-credentials: false
 
-      - name: Configure git
+      - name: Check if version changed
+        id: check_version
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          # .gitattributes references a custom "ours" merge driver, which git does not
-          # define by default -- it must be enabled per-checkout.
-          git config merge.ours.driver true
+          if [ ! -f app/build.gradle.kts ]; then
+            echo "File app/build.gradle.kts does not exist"
+            echo "version_changed=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          NEW_VERSION=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts || echo "")
+          VERSION_CODE=$(grep -oP 'versionCode\s*=\s*\K\d+' app/build.gradle.kts || echo "")
+
+          if [ -z "$NEW_VERSION" ]; then
+            echo "Could not find versionName in app/build.gradle.kts"
+            echo "version_changed=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Current version: $NEW_VERSION (code: $VERSION_CODE)"
+
+          if git show HEAD^:app/build.gradle.kts > /dev/null 2>&1; then
+            OLD_VERSION=$(git show HEAD^:app/build.gradle.kts | grep -oP 'versionName\s*=\s*"\K[^"]+' || echo "")
+            echo "Previous version: $OLD_VERSION"
+            
+            if [ "$OLD_VERSION" != "$NEW_VERSION" ]; then
+              echo "Version changed from $OLD_VERSION to $NEW_VERSION"
+              echo "version_changed=true" >> $GITHUB_OUTPUT
+              echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+              echo "version_code=$VERSION_CODE" >> $GITHUB_OUTPUT
+            else
+              echo "Version unchanged: $NEW_VERSION"
+              echo "version_changed=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "First version detected: $NEW_VERSION"
+            echo "version_changed=true" >> $GITHUB_OUTPUT
+            echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+            echo "version_code=$VERSION_CODE" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Debug output
+        run: |
+          echo "Debug Information:"
+          echo "  - version_changed: ${{ steps.check_version.outputs.version_changed }}"
+          echo "  - new_version: ${{ steps.check_version.outputs.new_version }}"
+          echo "  - version_code: ${{ steps.check_version.outputs.version_code }}"
+          echo "  - event_name: ${{ github.event_name }}"
+
+  build:
+    needs: check-version
+    if: needs.check-version.outputs.version_changed == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - variant: foss
+            variantName: Foss
+          - variant: gms
+            variantName: Gms
+          - variant: izzy
+            variantName: Izzy
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Set up JDK 21
         uses: actions/setup-java@v5
@@ -76,420 +103,121 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      # Both modes need upstream tags: mirror mode to merge the release, and both modes to
-      # build the pristine-upstream baseline for the differential unit-test gate.
-      - name: Add upstream remote
-        run: |
-          git remote add upstream https://github.com/MetrolistGroup/Metrolist.git \
-            || git remote set-url upstream https://github.com/MetrolistGroup/Metrolist.git
-          # --force so a tag that upstream ever moved can't fail the fetch; our own
-          # release tags are prefixed (fork-v...) and untouched by this.
-          git fetch --force --tags upstream
-
-      # ---- Mirror mode: sync latest upstream release into main ----
-
-      - name: Merge latest upstream release
-        if: github.event_name != 'push'
-        id: mirror
+      - name: Build and Lint Release APK
+        run: ./gradlew --console=plain clean assemble${{ matrix.variantName }}Release :app:lint${{ matrix.variantName }}Release --warning-mode summary
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          TAG=$(gh api repos/MetrolistGroup/Metrolist/releases/latest --jq .tag_name)
-          echo "Latest upstream release: $TAG"
-
-          if git merge-base --is-ancestor "$TAG" HEAD 2>/dev/null; then
-            echo "Upstream $TAG already in history (no merge needed)."
-          else
-            PRE_MERGE=$(git rev-parse HEAD)
-            if ! git merge --no-edit "$TAG"; then
-              git merge --abort
-              echo "::error::Merge conflict merging upstream $TAG -- aborted, main left untouched."
-              exit 1
-            fi
-
-            # Keep our CI fully under our own control. `merge=ours` in .gitattributes only
-            # resolves *content conflicts* on workflow files we both changed; it does NOT
-            # stop upstream-only edits, nor newly added upstream workflow files, from
-            # entering the fork (where a new upstream workflow could auto-activate).
-            # `git checkout <commit> -- path` alone restores modified/deleted files but does
-            # not remove files upstream *added*, so we `git rm -r` first: remove the whole
-            # dir, then restore exactly the fork's pre-merge set.
-            git rm -r --quiet -- .github/workflows
-            git checkout "$PRE_MERGE" -- .github/workflows
-            git add -A .github/workflows
-            if ! git diff --cached --quiet; then
-              git commit -m "ci: keep fork workflows after merging upstream $TAG" \
-                -m "Restore .github/workflows to the fork's exact pre-merge state. merge=ours
-              resolves only content conflicts; it does not stop upstream-only edits or newly
-              added upstream workflow files from entering the fork, where a new workflow could
-              auto-activate. Removing the directory before restoring drops files upstream added
-              as well as reverting edits, so the fork's workflow set is preserved exactly."
-            fi
-
-            # The merge may have moved the submodule gitlink; sync the working tree to it.
-            git submodule sync --recursive
-            git submodule update --init --recursive
-          fi
-
-          VERSION=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          # Upstream tag (pristine) -- used by the differential test baseline below.
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
-      # ---- Personal mode: interim release of our own commits ----
-
-      - name: Determine personal version
-        if: github.event_name == 'push'
-        id: personal
-        run: |
-          git fetch --force --tags origin main
-
-          # Stale/superseded push: a newer commit is already the branch tip. Skip so an
-          # older push that happens to run later can't publish a higher version number
-          # (with a lower versionCode) than the newer commit. Only the tip is released.
-          # FETCH_HEAD is the just-fetched main tip (reliable regardless of tracking-ref
-          # refspec configuration).
-          if [ "$(git rev-parse HEAD)" != "$(git rev-parse FETCH_HEAD)" ]; then
-            echo "HEAD is behind origin/main (superseded push); skipping."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          BASE=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts)
-
-          # Re-run idempotency: if this exact commit already has a personal tag, REUSE that
-          # version rather than minting a new one for the same code -- then let the shared
-          # idempotency check decide. If that release is complete it is skipped; if it is an
-          # incomplete (draft / missing-asset) partial publish, it is recreated. Skipping
-          # here instead would leave a failed personal release permanently unrepaired.
-          EXISTING=$(git tag --points-at HEAD -l "fork-v${BASE}.*" | sort -V | tail -1)
-          if [ -n "$EXISTING" ]; then
-            echo "HEAD already tagged $EXISTING ; reusing its version."
-            echo "version=${EXISTING#fork-v}" >> "$GITHUB_OUTPUT"
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # Highest existing 4th component among our fork-v<BASE>.N tags, +1.
-          LAST=$(git tag -l "fork-v${BASE}.*" | sed "s|^fork-v${BASE//./\\.}\.||" | sort -n | tail -1)
-          N=$(( ${LAST:-0} + 1 ))
-          echo "Base version $BASE, next personal release: ${BASE}.${N}"
-          echo "version=${BASE}.${N}" >> "$GITHUB_OUTPUT"
-          echo "skip=false" >> "$GITHUB_OUTPUT"
-
-      # ---- Shared: decide version, idempotency, build, sign, verify, publish ----
-
-      - name: Decide version and whether to proceed
-        id: release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            if [ "${{ steps.personal.outputs.skip }}" = "true" ]; then
-              echo "Personal run was skipped upstream; nothing to do."
-              echo "proceed=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            VERSION="${{ steps.personal.outputs.version }}"
-          else
-            VERSION="${{ steps.mirror.outputs.version }}"
-          fi
-          TAG="fork-v${VERSION}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
-          # Retry-edge guard (mirror mode): if a personal release on this base already
-          # exists (fork-v${VERSION}.N), the base mirror is superseded -- a personal release
-          # is always built on top of the merged main, so it already contains this upstream
-          # version. Skipping avoids re-building the base from a main that personal commits
-          # have since advanced (which would otherwise mislabel newer source as $VERSION).
-          if [ "${{ github.event_name }}" != "push" ]; then
-            if gh release list --repo "$GITHUB_REPOSITORY" --json tagName --jq '.[].tagName' 2>/dev/null \
-                 | grep -q "^fork-v${VERSION//./\\.}\."; then
-              echo "A personal release on base $VERSION already exists; base mirror superseded. Skipping."
-              echo "proceed=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          fi
-
-          # Idempotency: a version is "done" only if a PUBLISHED (non-draft) release for
-          # its tag already carries the Metrolist.apk asset. A release that is still a
-          # draft, or that exists but is missing the asset (a partial/failed publish), is
-          # NOT done -- we recreate it in the Create Release step below. This is what makes
-          # a failed publish self-healing rather than permanently skipped.
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,assets \
-               --jq 'select(.isDraft == false) | .assets[].name' 2>/dev/null \
-               | grep -qx "Metrolist.apk"; then
-            echo "Release $TAG already published with the APK; nothing to do."
-            echo "proceed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "proceed=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Compute version code
-        if: steps.release.outputs.proceed == 'true'
-        id: code
-        run: echo "code=$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
-
-      # The differential test gate needs a pristine-upstream baseline: the upstream release
-      # tag for the current base version. Mirror mode already has it; personal mode derives
-      # it from the base version (versionName), since the fork sits on top of that release.
-      - name: Determine upstream baseline tag
-        if: steps.release.outputs.proceed == 'true'
-        id: baseline
-        run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            BASE=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts)
-            echo "tag=v${BASE}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${{ steps.mirror.outputs.tag }}" >> "$GITHUB_OUTPUT"
-          fi
-
-      # A given upstream tag's test results are immutable, so cache the pristine failure set
-      # keyed by that tag. Upstream ships with some permanently-failing unit tests, so the
-      # merged build's tests fail on essentially every run; without this cache we would
-      # rebuild the pristine baseline every time instead of once per upstream version.
-      - name: Restore pristine baseline failures
-        if: steps.release.outputs.proceed == 'true'
-        id: baseline_cache
-        uses: actions/cache@v4
-        with:
-          path: pristine_fails.txt
-          key: pristine-fails-${{ steps.baseline.outputs.tag }}
-
-      # Gate releases on unit tests, differentially in BOTH modes: run the merged (fork)
-      # tests, and tolerate a failure only if the SAME test+type also fails on the pristine
-      # upstream baseline. Any failure our changes introduce (absent from the baseline)
-      # blocks; upstream's own pre-existing failures do not. A plain hard-gate would be
-      # unusable because upstream ships with failing tests.
-      - name: Run unit tests
-        if: steps.release.outputs.proceed == 'true'
-        env:
-          BASELINE_TAG: ${{ steps.baseline.outputs.tag }}
-          BASELINE_CACHED: ${{ steps.baseline_cache.outputs.cache-hit }}
-        run: |
-          TEST_TASK=":app:testFossDebugUnitTest"
-          REPORTS="app/build/test-results/testFossDebugUnitTest/*.xml"
-
-          if ./gradlew --console=plain "$TEST_TASK" --warning-mode summary; then
-            echo "Merged unit tests passed."
-            exit 0
-          fi
-          echo "::warning::Merged unit tests failed; analysing which tests failed."
-
-          # Which tests failed in the merged build? If none can be parsed, the failure is
-          # not a test failure (compile/config) -- fail closed.
-          if ! MERGED_FAILS="$(python3 .github/scripts/failed_tests.py "$REPORTS")"; then
-            echo "::error::Could not parse merged test reports (compile/config error?). Blocking."
-            exit 1
-          fi
-          if [ -z "$MERGED_FAILS" ]; then
-            echo "::error::Build failed without identifiable test failures. Blocking."
-            exit 1
-          fi
-          echo "Merged failures:"; echo "$MERGED_FAILS"
-
-          # Pristine-upstream baseline failures for $BASELINE_TAG (cached; results per tag
-          # are immutable). Build it only on a cache miss.
-          if [ "$BASELINE_CACHED" = "true" ] && [ -f pristine_fails.txt ]; then
-            echo "Using cached pristine baseline for $BASELINE_TAG."
-            PRISTINE_FAILS="$(cat pristine_fails.txt)"
-          else
-            echo "Building pristine upstream baseline at $BASELINE_TAG ..."
-            if ! git rev-parse -q --verify "refs/tags/$BASELINE_TAG" >/dev/null; then
-              echo "::error::Cannot resolve upstream baseline tag $BASELINE_TAG; failing closed."
-              exit 1
-            fi
-            git worktree add --detach ../pristine-baseline "$BASELINE_TAG"
-            git -C ../pristine-baseline submodule update --init --recursive
-            ( cd ../pristine-baseline && ./gradlew --console=plain "$TEST_TASK" --warning-mode summary ) || true
-            if ! PRISTINE_FAILS="$(python3 .github/scripts/failed_tests.py "../pristine-baseline/$REPORTS")"; then
-              git worktree remove --force ../pristine-baseline
-              echo "::error::Could not parse pristine upstream test reports; failing closed. Blocking."
-              exit 1
-            fi
-            git worktree remove --force ../pristine-baseline
-            printf '%s\n' "$PRISTINE_FAILS" > pristine_fails.txt
-          fi
-          echo "Pristine upstream failures:"; echo "$PRISTINE_FAILS"
-
-          # Merged failures absent from the pristine set = introduced by our changes.
-          NEW_FAILS="$(comm -23 <(printf '%s\n' "$MERGED_FAILS" | sort -u) <(printf '%s\n' "$PRISTINE_FAILS" | sort -u))"
-          if [ -n "$NEW_FAILS" ]; then
-            echo "::error::Test failures introduced by our changes (fail on our fork but pass on pristine upstream $BASELINE_TAG):"
-            echo "$NEW_FAILS"
-            exit 1
-          fi
-          echo "::warning::Every merged failure also fails on pristine upstream $BASELINE_TAG; pre-existing upstream issue, not blocking."
-
-      - name: Build Release APK
-        if: steps.release.outputs.proceed == 'true'
-        run: |
-          # `clean` runs as its own invocation, fully serialized before the build starts.
-          # Running it in the same invocation as assemble (as upstream's own workflow does)
-          # lets Gradle's parallel task execution start the custom :app:generateProto task's
-          # protoc download into app/build/protoc at the same moment clean is deleting
-          # app/build -- a real, observed race ("Unable to delete directory ... New files
-          # were found") since that task's output isn't declared for Gradle to order against
-          # clean. This avoids the race without touching upstream's build script.
-          ./gradlew --console=plain clean --warning-mode summary
-          ./gradlew --console=plain assembleFossRelease :app:lintFossRelease --warning-mode summary
-        env:
-          METROLIST_APPLICATION_ID: ${{ env.FORK_APP_ID }}
-          METROLIST_APP_NAME: ${{ env.FORK_APP_NAME }}
-          METROLIST_VERSION_NAME: ${{ steps.release.outputs.version }}
-          METROLIST_VERSION_CODE: ${{ steps.code.outputs.code }}
-          UPDATE_REPO: ${{ github.repository }}
-          DISCORD_APP_ID: ${{ secrets.DISCORD_APP_ID }}
+          METROLIST_APPLICATION_ID: com.metrolist.music
+          METROLIST_APP_NAME: Metrolist
           PULL_REQUEST: "false"
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
           LASTFM_SECRET: ${{ secrets.LASTFM_SECRET }}
 
       - name: Sign APK
-        if: steps.release.outputs.proceed == 'true'
-        uses: ilharp/sign-android-release@13dd52242698526f951aa8bb8696204f6fea702a # v2.0.0
+        uses: ilharp/sign-android-release@v2.0.0
         with:
-          releaseDir: app/build/outputs/apk/foss/release/
+          releaseDir: app/build/outputs/apk/${{ matrix.variant }}/release/
           signingKey: ${{ secrets.KEYSTORE }}
           keyAlias: ${{ secrets.KEY_ALIAS }}
           keyStorePassword: ${{ secrets.KEYSTORE_PASSWORD }}
           keyPassword: ${{ secrets.KEY_PASSWORD }}
           buildToolsVersion: 35.0.0
 
-      - name: Rename signed APK
-        if: steps.release.outputs.proceed == 'true'
+      - name: Move and rename signed APKs
         run: |
-          OUTPUT_DIR="app/build/outputs/apk/foss/release"
+          OUTPUT_DIR="app/build/outputs/apk/${{ matrix.variant }}/release"
           mkdir -p "$OUTPUT_DIR/out"
 
           SIGNED_APK=$(find "$OUTPUT_DIR" -name "*-signed.apk" -o -name "*-unsigned-signed.apk" | head -1)
 
           if [ -z "$SIGNED_APK" ]; then
-            echo "No signed APK found"
+            echo "No signed APK found for ${{ matrix.variant }}"
             ls -la "$OUTPUT_DIR"
             exit 1
           fi
 
-          mv "$SIGNED_APK" "$OUTPUT_DIR/out/Metrolist.apk"
+          if [ "${{ matrix.variant }}" = "gms" ]; then
+            TARGET_NAME="Metrolist-with-Google-Cast.apk"
+          elif [ "${{ matrix.variant }}" = "izzy" ]; then
+            TARGET_NAME="Metrolist-izzy.apk"
+          else
+            TARGET_NAME="Metrolist.apk"
+          fi
 
-      - name: Verify signed APK
-        if: steps.release.outputs.proceed == 'true'
-        env:
-          EXPECTED_CERT_SHA256: ${{ vars.SIGNING_CERT_SHA256 }}
-          EXPECTED_VERSION_NAME: ${{ steps.release.outputs.version }}
-          EXPECTED_VERSION_CODE: ${{ steps.code.outputs.code }}
+          mv "$SIGNED_APK" "$OUTPUT_DIR/out/$TARGET_NAME"
+
+          echo "APK renamed to: $TARGET_NAME"
+          ls -la "$OUTPUT_DIR/out/"
+
+      - name: Upload Signed APKs
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.variant == 'gms' && 'Metrolist-with-Google-Cast' || matrix.variant == 'izzy' && 'Metrolist-izzy' || 'Metrolist' }}
+          path: app/build/outputs/apk/${{ matrix.variant }}/release/out/*.apk
+
+  create-release:
+    needs: [check-version, build]
+    if: needs.check-version.outputs.version_changed == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download all APKs
+        uses: actions/download-artifact@v7
+        with:
+          path: downloaded_artifacts/
+
+      - name: Organize APKs for release
         run: |
-          APK="app/build/outputs/apk/foss/release/out/Metrolist.apk"
-          BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
-          echo "Using build-tools: $BT"
+          echo "Organizing APK files..."
+          mkdir -p release_files
 
-          # 1) The APK must be validly signed at all.
-          CERTS="$("$BT/apksigner" verify --print-certs "$APK")"
-          echo "$CERTS"
+          find downloaded_artifacts -name "*.apk" -exec cp {} release_files/ \;
 
-          # 2) It must be signed with OUR permanent key -- not merely *some* valid key. A
-          # swapped/regenerated keystore would produce an APK that cannot update existing
-          # installs, so assert the certificate SHA-256 against the known fingerprint held
-          # in the SIGNING_CERT_SHA256 repository variable (compared colon/case-insensitively).
-          norm() { tr -d ': ' | tr 'A-F' 'a-f'; }
-          EXPECTED="$(printf '%s' "$EXPECTED_CERT_SHA256" | norm)"
-          if [ -z "$EXPECTED" ]; then
-            echo "::error::Repository variable SIGNING_CERT_SHA256 is not set; cannot verify signing identity."
-            exit 1
-          fi
-          ACTUAL="$(awk '/certificate SHA-256 digest/{print $NF; exit}' <<<"$CERTS" | norm)"
-          echo "Expected cert SHA-256: $EXPECTED"
-          echo "Actual   cert SHA-256: $ACTUAL"
-          if [ "$ACTUAL" != "$EXPECTED" ]; then
-            echo "::error::APK signing certificate does not match the fork's permanent key."
-            exit 1
-          fi
-
-          # 3) Package id, versionName and versionCode must be exactly what we intended.
-          BADGING="$("$BT/aapt" dump badging "$APK")"
-          PKG="$(sed -n "s/.*package: name='\([^']*\)'.*/\1/p" <<<"$BADGING")"
-          VNAME="$(sed -n "s/.*versionName='\([^']*\)'.*/\1/p" <<<"$BADGING")"
-          VCODE="$(sed -n "s/.*versionCode='\([^']*\)'.*/\1/p" <<<"$BADGING")"
-          echo "package=$PKG versionName=$VNAME versionCode=$VCODE"
-
-          [ "$PKG" = "$FORK_APP_ID" ] || { echo "::error::package id '$PKG' != '$FORK_APP_ID'"; exit 1; }
-          [ "$VNAME" = "$EXPECTED_VERSION_NAME" ] || { echo "::error::versionName '$VNAME' != '$EXPECTED_VERSION_NAME'"; exit 1; }
-          [ "$VCODE" = "$EXPECTED_VERSION_CODE" ] || { echo "::error::versionCode '$VCODE' != '$EXPECTED_VERSION_CODE'"; exit 1; }
+          echo "APKs ready for release:"
+          ls -la release_files/
 
       - name: Parse release notes from changelog
-        if: steps.release.outputs.proceed == 'true'
         run: |
-          VERSION="${{ steps.release.outputs.version }}"
+          VERSION="${{ needs.check-version.outputs.new_version }}"
           chmod +x .github/scripts/parse_changelog.sh
 
           if bash .github/scripts/parse_changelog.sh "$VERSION" changelog.md > release_notes.md; then
             echo "Release notes sourced from changelog.md for v$VERSION"
+            echo "--- Preview (first 20 lines) ---"
+            head -20 release_notes.md
           else
-            echo "::warning::v$VERSION not found in changelog.md -- falling back to git log"
+            echo "::warning::v$VERSION not found in changelog.md — falling back to git log"
             {
               echo "Release of version $VERSION"
               echo ""
               git log "$(git describe --tags --abbrev=0 2>/dev/null || echo "HEAD~10")..HEAD" \
                 --pretty=format:"- %s" --no-merges | head -10 || echo "- Initial release"
             } > release_notes.md
+            echo "--- Fallback notes ---"
+            cat release_notes.md
           fi
-
-      - name: Push merged main
-        if: steps.release.outputs.proceed == 'true' && github.event_name != 'push'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          # Token supplied inline (credentials are not persisted in git config) so the
-          # write-capable credential never sits in the workspace during the build.
-          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
 
       - name: Create Release
-        if: steps.release.outputs.proceed == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
-          TAG="${{ steps.release.outputs.tag }}"
-          VERSION="${{ steps.release.outputs.version }}"
+          echo "Creating release v${{ needs.check-version.outputs.new_version }}"
 
-          # We only reach here when the release is absent or incomplete (draft / missing
-          # APK). Remove any such partial release (and its tag) so we can recreate cleanly.
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Removing incomplete existing release $TAG before recreating."
-            gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
-          fi
-
-          # Mark this "latest" only if its version is >= the current latest release's, so a
-          # mirror of an older base (13.6.1) can't demote a newer personal release
-          # (13.6.1.1) that already exists. sort -V does the dotted-version comparison.
-          CUR=$(gh release view --repo "$GITHUB_REPOSITORY" --json name --jq .name 2>/dev/null || echo "0.0.0")
-          HIGHEST=$(printf '%s\n%s\n' "$VERSION" "$CUR" | sort -V | tail -1)
-          if [ "$HIGHEST" = "$VERSION" ]; then LATEST="--latest"; else LATEST="--latest=false"; fi
-          echo "Current latest release: $CUR ; this: $VERSION ; make latest: $LATEST"
-
-          # Tag is prefixed (fork-v...) to avoid colliding with upstream's vX.Y.Z tags;
-          # the title is the bare numeric version, which is what the updater compares.
-          # --target pins the tag to the exact commit we built and verified; without it,
-          # gh would tag the current default-branch tip, which another push could have
-          # advanced past our source during the build.
-          # --repo is mandatory: with the upstream remote present, gh resolves the
-          # base repo to the fork's parent (MetrolistGroup/Metrolist) by default and
-          # the run token can't write there (HTTP 403). Pin it to our own repo.
-          gh release create "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "$VERSION" \
-            --target "$(git rev-parse HEAD)" \
+          gh release create "v${{ needs.check-version.outputs.new_version }}" \
+            --title "${{ needs.check-version.outputs.new_version }}" \
             --notes-file release_notes.md \
-            $LATEST \
-            app/build/outputs/apk/foss/release/out/Metrolist.apk
+            --latest \
+            release_files/*.apk
+
+          echo "Release created successfully!"
 
       - name: Update release summary
-        if: steps.release.outputs.proceed == 'true'
         run: |
-          MODE=$([ "${{ github.event_name }}" = "push" ] && echo "personal" || echo "mirror")
           echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
-          echo "- **Mode**: $MODE" >> $GITHUB_STEP_SUMMARY
-          echo "- **Version**: ${{ steps.release.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Tag**: ${{ steps.release.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Version Code**: ${{ steps.code.outputs.code }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Release URL**: https://github.com/${{ github.repository }}/releases/tag/${{ steps.release.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version**: v${{ needs.check-version.outputs.new_version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version Code**: ${{ needs.check-version.outputs.version_code }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **APKs Built**: $(ls release_files/*.apk | wc -l)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Release URL**: https://github.com/${{ github.repository }}/releases/tag/v${{ needs.check-version.outputs.new_version }}" >> $GITHUB_STEP_SUMMARY
