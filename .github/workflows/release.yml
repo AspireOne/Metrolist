@@ -321,7 +321,16 @@ jobs:
 
       - name: Build Release APK
         if: steps.release.outputs.proceed == 'true'
-        run: ./gradlew --console=plain clean assembleFossRelease :app:lintFossRelease --warning-mode summary
+        run: |
+          # `clean` runs as its own invocation, fully serialized before the build starts.
+          # Running it in the same invocation as assemble (as upstream's own workflow does)
+          # lets Gradle's parallel task execution start the custom :app:generateProto task's
+          # protoc download into app/build/protoc at the same moment clean is deleting
+          # app/build -- a real, observed race ("Unable to delete directory ... New files
+          # were found") since that task's output isn't declared for Gradle to order against
+          # clean. This avoids the race without touching upstream's build script.
+          ./gradlew --console=plain clean --warning-mode summary
+          ./gradlew --console=plain assembleFossRelease :app:lintFossRelease --warning-mode summary
         env:
           METROLIST_APPLICATION_ID: ${{ env.FORK_APP_ID }}
           METROLIST_APP_NAME: ${{ env.FORK_APP_NAME }}
