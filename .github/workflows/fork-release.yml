@@ -469,6 +469,7 @@ jobs:
 
       - name: Create Release
         if: steps.release.outputs.proceed == 'true'
+        id: publish
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
@@ -476,6 +477,26 @@ jobs:
         run: |
           TAG="$RELEASE_TAG"
           VERSION="$RELEASE_VERSION"
+
+          # A push can advance main while this long-running build is in progress. The
+          # GITHUB_TOKEN cannot create a tag targeting that now-superseded commit, and
+          # tagging the new tip would attach the verified APK to source we did not build.
+          # Treat supersession as an expected skip and leave releases/tags untouched.
+          BUILT_COMMIT=$(git rev-parse HEAD)
+          MAIN_COMMIT=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          if [ "$BUILT_COMMIT" != "$MAIN_COMMIT" ]; then
+            echo "::notice::Release $TAG skipped because main advanced during the build."
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "## Release Skipped"
+              echo "- **Reason**: main advanced during the build"
+              echo "- **Version**: $VERSION"
+              echo "- **Tag**: $TAG"
+              echo "- **Built commit**: $BUILT_COMMIT"
+              echo "- **Current main**: $MAIN_COMMIT"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
 
           # We only reach here when the release is absent or incomplete (draft / missing
           # APK). Remove any such partial release (and its tag) so we can recreate cleanly.
@@ -507,9 +528,10 @@ jobs:
             --notes-file release_notes.md \
             $LATEST \
             app/build/outputs/apk/foss/release/out/Metrolist.apk
+          echo "published=true" >> "$GITHUB_OUTPUT"
 
       - name: Update release summary
-        if: steps.release.outputs.proceed == 'true'
+        if: steps.release.outputs.proceed == 'true' && steps.publish.outputs.published == 'true'
         env:
           EVENT_NAME: ${{ github.event_name }}
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
