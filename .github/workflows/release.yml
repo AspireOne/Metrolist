@@ -469,7 +469,11 @@ jobs:
           # --target pins the tag to the exact commit we built and verified; without it,
           # gh would tag the current default-branch tip, which another push could have
           # advanced past our source during the build.
+          # --repo is mandatory: with the upstream remote present, gh resolves the
+          # base repo to the fork's parent (MetrolistGroup/Metrolist) by default and
+          # the run token can't write there (HTTP 403). Pin it to our own repo.
           gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
             --title "$VERSION" \
             --target "$(git rev-parse HEAD)" \
             --notes-file release_notes.md \
