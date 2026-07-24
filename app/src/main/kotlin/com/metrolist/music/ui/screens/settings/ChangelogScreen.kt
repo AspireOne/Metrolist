@@ -49,7 +49,9 @@ fun ChangelogScreen(
     LaunchedEffect(Unit) {
         Updater.getAllReleases().onSuccess { allReleases ->
             releases = allReleases.filter { release ->
-                Updater.compareVersions(BuildConfig.VERSION_NAME, release.tagName) >= 0
+                // Compare the numeric versionName (release title), not tagName -- our fork
+                // tags are prefixed "fork-v..." which compareVersions would parse as 0.
+                Updater.compareVersions(BuildConfig.VERSION_NAME, release.versionName) >= 0
             }
             isLoading = false
         }.onFailure {
@@ -135,7 +137,9 @@ fun ChangelogScreen(
                     .align(Alignment.BottomEnd)
                     .padding(16.dp)
             ) {
-                val githubReleasesUrl = stringResource(R.string.github_releases_url)
+                // Derived from the updater target repo so "View on GitHub" tracks the same
+                // fork as update checks, without editing the per-locale string resources.
+                val githubReleasesUrl = "https://github.com/${BuildConfig.UPDATE_REPO}/releases"
                 ExtendedFloatingActionButton(
                     onClick = { uriHandler.openUri(githubReleasesUrl) },
                     icon = { Icon(painterResource(R.drawable.github), contentDescription = null, modifier = Modifier.size(24.dp)) },

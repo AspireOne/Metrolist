@@ -22,6 +22,8 @@ if (localPropertiesFile.exists()) {
 val baseApplicationId = "com.metrolist.music"
 val applicationIdOverride = System.getenv("METROLIST_APPLICATION_ID")?.takeIf { it.isNotBlank() }
 val appNameOverride = System.getenv("METROLIST_APP_NAME")?.takeIf { it.isNotBlank() }
+val versionNameOverride = System.getenv("METROLIST_VERSION_NAME")?.takeIf { it.isNotBlank() }
+val versionCodeOverride = System.getenv("METROLIST_VERSION_CODE")?.toIntOrNull()
 val debugKeystorePathOverride = System.getenv("METROLIST_DEBUG_KEYSTORE_PATH")?.takeIf { it.isNotBlank() }
 val debugKeystorePassword = System.getenv("METROLIST_DEBUG_KEYSTORE_PASSWORD")?.takeIf { it.isNotBlank() } ?: "android"
 val debugKeyAlias = System.getenv("METROLIST_DEBUG_KEY_ALIAS")?.takeIf { it.isNotBlank() } ?: "androiddebugkey"
@@ -104,6 +106,9 @@ android {
         versionCode = 150
         versionName = "13.6.1"
         resValue("string", "app_name", appNameOverride ?: "Metrolist")
+        // Exposed to resources (e.g. static shortcuts' targetPackage) so they follow the
+        // fork's applicationId. Overridden in the debug build type to include its suffix.
+        resValue("string", "app_package", applicationIdOverride ?: baseApplicationId)
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
@@ -116,10 +121,25 @@ android {
         val lastFmKey = localProperties.getProperty("LASTFM_API_KEY") ?: System.getenv("LASTFM_API_KEY") ?: ""
         val lastFmSecret = localProperties.getProperty("LASTFM_SECRET") ?: System.getenv("LASTFM_SECRET") ?: ""
 
+        // Override with your own Discord application's client ID in local.properties
+        // (key: DISCORD_APP_ID) or the DISCORD_APP_ID env var if you need OAuth2/Social SDK
+        // scopes your own Discord app is registered for.
+        val discordAppId = localProperties.getProperty("DISCORD_APP_ID")?.takeIf { it.isNotBlank() }
+            ?: System.getenv("DISCORD_APP_ID")?.takeIf { it.isNotBlank() }
+            ?: "1447278780795064401"
+
+        // Updater target repo (owner/name) for in-app update checks. Override in
+        // local.properties (key: UPDATE_REPO) or the UPDATE_REPO env var to point the
+        // updater at your own fork's releases instead of upstream's.
+        val updateRepo = localProperties.getProperty("UPDATE_REPO")?.takeIf { it.isNotBlank() }
+            ?: System.getenv("UPDATE_REPO")?.takeIf { it.isNotBlank() }
+            ?: "MetrolistGroup/Metrolist"
+
         buildConfigField("String", "LASTFM_API_KEY", "\"$lastFmKey\"")
         buildConfigField("String", "LASTFM_SECRET", "\"$lastFmSecret\"")
         buildConfigField("String", "ARCHITECTURE", "\"universal\"")
-        buildConfigField("Long", "DISCORD_APP_ID", "1447278780795064401L")
+        buildConfigField("Long", "DISCORD_APP_ID", "${discordAppId}L")
+        buildConfigField("String", "UPDATE_REPO", "\"$updateRepo\"")
     }
 
     flavorDimensions += listOf("variant")
@@ -188,6 +208,7 @@ android {
         debug {
             if (applicationIdOverride == null) {
                 applicationIdSuffix = ".debug"
+                resValue("string", "app_package", "$baseApplicationId.debug")
             }
             isDebuggable = true
             if (appNameOverride == null) {
@@ -258,6 +279,11 @@ android {
         }
     }
 }
+
+// Applied outside defaultConfig so upstream's versionCode/versionName lines above stay
+// untouched and never conflict on merge -- CI feeds these in for mirror/personal releases.
+versionCodeOverride?.let { android.defaultConfig.versionCode = it }
+versionNameOverride?.let { android.defaultConfig.versionName = it }
 
 val protocVersion = libs.versions.protobuf.get()
 
