@@ -103,8 +103,8 @@ android {
         applicationId = applicationIdOverride ?: baseApplicationId
         minSdk = 26
         targetSdk = 36
-        versionCode = 149
-        versionName = "13.6.0"
+        versionCode = 150
+        versionName = "13.6.1"
         resValue("string", "app_name", appNameOverride ?: "Metrolist")
         // Exposed to resources (e.g. static shortcuts' targetPackage) so they follow the
         // fork's applicationId. Overridden in the debug build type to include its suffix.
@@ -234,7 +234,6 @@ android {
     kotlin {
         jvmToolchain(21)
         compilerOptions {
-            freeCompilerArgs.add("-Xannotation-default-target=param-property")
             jvmTarget.set(JvmTarget.JVM_21)
         }
     }
@@ -427,8 +426,6 @@ dependencies {
     implementation(libs.ktor.client.cio)
     implementation(libs.ktor.client.content.negotiation)
     implementation(libs.ktor.client.encoding)
-    implementation(libs.ktor.server.core)
-    implementation(libs.ktor.server.cio)
     implementation(libs.ktor.serialization.json)
 
     // Protobuf for message serialization (lite version for Android)
