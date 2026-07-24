@@ -248,6 +248,12 @@ jobs:
         env:
           BASELINE_TAG: ${{ steps.baseline.outputs.tag }}
           BASELINE_CACHED: ${{ steps.baseline_cache.outputs.cache-hit }}
+          # Required at Gradle *configuration* time (see app/build.gradle.kts): the fork
+          # fails the build loudly if DISCORD_APP_ID is unset, so every gradlew invocation
+          # -- including this test gate, which runs before the build step -- needs it. The
+          # pristine-baseline invocation below is upstream code (with its own fallback) and
+          # ignores this, but inheriting it is harmless.
+          DISCORD_APP_ID: ${{ secrets.DISCORD_APP_ID }}
         run: |
           TEST_TASK=":app:testFossDebugUnitTest"
           REPORTS="app/build/test-results/testFossDebugUnitTest/*.xml"
