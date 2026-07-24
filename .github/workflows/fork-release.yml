@@ -113,6 +113,10 @@ jobs:
           fi
 
           VERSION=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts)
+          if [[ ! "$VERSION" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+            echo "::error::Upstream versionName is not a single dotted numeric version."
+            exit 1
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           # Upstream tag (pristine) -- used by the differential test baseline below.
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
@@ -137,6 +141,10 @@ jobs:
           fi
 
           BASE=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts)
+          if [[ ! "$BASE" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+            echo "::error::Base versionName is not a single dotted numeric version."
+            exit 1
+          fi
 
           # Re-run idempotency: if this exact commit already has a personal tag, REUSE that
           # version rather than minting a new one for the same code -- then let the shared
@@ -163,17 +171,26 @@ jobs:
       - name: Decide version and whether to proceed
         id: release
         env:
+          EVENT_NAME: ${{ github.event_name }}
           GH_TOKEN: ${{ github.token }}
+          MIRROR_VERSION: ${{ steps.mirror.outputs.version }}
+          PERSONAL_SKIP: ${{ steps.personal.outputs.skip }}
+          PERSONAL_VERSION: ${{ steps.personal.outputs.version }}
         run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            if [ "${{ steps.personal.outputs.skip }}" = "true" ]; then
+          if [ "$EVENT_NAME" = "push" ]; then
+            if [ "$PERSONAL_SKIP" = "true" ]; then
               echo "Personal run was skipped upstream; nothing to do."
               echo "proceed=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            VERSION="${{ steps.personal.outputs.version }}"
+            VERSION="$PERSONAL_VERSION"
           else
-            VERSION="${{ steps.mirror.outputs.version }}"
+            VERSION="$MIRROR_VERSION"
+          fi
+
+          if [[ ! "$VERSION" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+            echo "::error::Selected release version is not a single dotted numeric version."
+            exit 1
           fi
           TAG="fork-v${VERSION}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -184,7 +201,7 @@ jobs:
           # is always built on top of the merged main, so it already contains this upstream
           # version. Skipping avoids re-building the base from a main that personal commits
           # have since advanced (which would otherwise mislabel newer source as $VERSION).
-          if [ "${{ github.event_name }}" != "push" ]; then
+          if [ "$EVENT_NAME" != "push" ]; then
             if gh release list --repo "$GITHUB_REPOSITORY" --json tagName --jq '.[].tagName' 2>/dev/null \
                  | grep -q "^fork-v${VERSION//./\\.}\."; then
               echo "A personal release on base $VERSION already exists; base mirror superseded. Skipping."
@@ -218,12 +235,19 @@ jobs:
       - name: Determine upstream baseline tag
         if: steps.release.outputs.proceed == 'true'
         id: baseline
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MIRROR_TAG: ${{ steps.mirror.outputs.tag }}
         run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
+          if [ "$EVENT_NAME" = "push" ]; then
             BASE=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts)
+            if [[ ! "$BASE" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+              echo "::error::Base versionName is not a single dotted numeric version."
+              exit 1
+            fi
             TAG="v${BASE}"
           else
-            TAG="${{ steps.mirror.outputs.tag }}"
+            TAG="$MIRROR_TAG"
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
@@ -415,8 +439,10 @@ jobs:
 
       - name: Parse release notes from changelog
         if: steps.release.outputs.proceed == 'true'
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: |
-          VERSION="${{ steps.release.outputs.version }}"
+          VERSION="$RELEASE_VERSION"
           chmod +x .github/scripts/parse_changelog.sh
 
           if bash .github/scripts/parse_changelog.sh "$VERSION" changelog.md > release_notes.md; then
@@ -445,9 +471,11 @@ jobs:
         if: steps.release.outputs.proceed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: |
-          TAG="${{ steps.release.outputs.tag }}"
-          VERSION="${{ steps.release.outputs.version }}"
+          TAG="$RELEASE_TAG"
+          VERSION="$RELEASE_VERSION"
 
           # We only reach here when the release is absent or incomplete (draft / missing
           # APK). Remove any such partial release (and its tag) so we can recreate cleanly.
@@ -482,11 +510,19 @@ jobs:
 
       - name: Update release summary
         if: steps.release.outputs.proceed == 'true'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          REPOSITORY: ${{ github.repository }}
+          VERSION_CODE: ${{ steps.code.outputs.code }}
         run: |
-          MODE=$([ "${{ github.event_name }}" = "push" ] && echo "personal" || echo "mirror")
-          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
-          echo "- **Mode**: $MODE" >> $GITHUB_STEP_SUMMARY
-          echo "- **Version**: ${{ steps.release.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Tag**: ${{ steps.release.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Version Code**: ${{ steps.code.outputs.code }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Release URL**: https://github.com/${{ github.repository }}/releases/tag/${{ steps.release.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          MODE=$([ "$EVENT_NAME" = "push" ] && echo "personal" || echo "mirror")
+          {
+            echo "## Release Summary"
+            echo "- **Mode**: $MODE"
+            echo "- **Version**: $RELEASE_VERSION"
+            echo "- **Tag**: $RELEASE_TAG"
+            echo "- **Version Code**: $VERSION_CODE"
+            echo "- **Release URL**: https://github.com/$REPOSITORY/releases/tag/$RELEASE_TAG"
+          } >> "$GITHUB_STEP_SUMMARY"
