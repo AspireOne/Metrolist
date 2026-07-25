@@ -217,6 +217,39 @@ Root `settings.gradle.kts` includes the `:app` plus seven Android-library module
 - `di/` — Hilt modules; `di/Qualifiers.kt` defines `@ApplicationScope`.
 - `com/dpi/*` — `ContentProvider`s used to hook early init, **not** for content.
 
+## Discord RPC subsystem — invariants
+
+`discord/` plus the Discord blocks in `playback/MusicService.kt`. The connection lifecycle was
+rewritten to fix a permanent deadlock and a token feedback loop (upstream PR #4164). The rules
+below are load-bearing — breaking one reintroduces a bug class that is hard to reproduce and
+was originally only diagnosable from on-device thread dumps.
+
+- **One owner.** `DiscordRpcManager`'s epoch coordinator is the only thing that opens connections:
+  a single worker drains a `ConnectionIntent` queue, and bumping `connectionEpoch` invalidates any
+  in-flight work. Do not add a second path that calls `gateway.connect()`.
+- **Never hold a lock across a suspending or network call.** The previous design awaited the
+  WebSocket handshake inside `reconnectMutex.withLock`; one superseded handshake left the mutex
+  held forever and every later reconnect queued behind it silently, recoverable only by killing
+  the process. `synchronized(coordinatorLock)` blocks must stay non-suspending — capture state,
+  exit, then do I/O.
+- **Never reconnect in reaction to `accessTokenFlow`.** Every write to it already comes from a path
+  that establishes the connection itself. Reacting to it with another reconnect echoed a stale
+  captured token back over a newer one, tearing down working connections in a self-sustaining loop.
+  `MusicService`'s token collector may initialize, never connect.
+- **Gateway sends are connection-scoped.** `identify` / `resume` / `heartbeat` take a `connectionId`
+  and throw `GatewaySupersededException` if that connection is no longer active. `presenceUpdate`
+  is deliberately *not* scoped and relies on the `_ready` guard instead — `beginEstablish()` clears
+  `_ready` under `coordinatorLock` **before** any close/connect, and the presence senders are
+  non-suspending from that check to the send. Keep both halves of that arrangement or scope
+  presence too.
+- **The retry ladder self-arms.** `MAX_RECONNECT_ATTEMPTS` exhaustion is not terminal: an
+  `EnsureConnected` intent arriving from outside a retry resets `reconnectAttempts` /
+  `retryExhausted`, and `syncDiscordState`'s 30s poll supplies exactly that. Presence recovering
+  on its own within ~30s is by design; don't "fix" it with another retry mechanism.
+- Presence-sending paths are all gated on `discordRpcEnabled`, so a connection established while
+  RPC is off broadcasts nothing — but it is still a live authenticated socket with heartbeats.
+  Gate *connecting*, not just sending.
+
 ## Build flags / environment
 
 `app/build.gradle.kts` reads optional env vars (and `local.properties` for LastFM):
@@ -229,6 +262,8 @@ Root `settings.gradle.kts` includes the `:app` plus seven Android-library module
 
 - `org.json:json` is **globally excluded** (`app/build.gradle.kts:331-333`). The standalone artefact bundles an Apache Harmony `JSONArray` with an internal `myArrayList` field absent from Android's platform `org.json`; R8 inlines against it and crashes with `NoSuchFieldError` at runtime. Don't re-add it.
 - `app/src/main/assets/player_configs.json` and `player_dates.json` are auto-synced from `ZemerTeam/zemer-cipher` by `.github/workflows/sync-player-configs.yml` upstream — but **that workflow is disabled in this fork** (it committed straight to `main`, which would have cut a spurious personal release twice a day). These files therefore only update when a mirror merge brings upstream's committed version across. Don't hand-edit them.
+- `dataStore.get(key)` / `dataStore[key]` do `runBlocking(Dispatchers.IO)` internally — every call is a blocking disk read on the calling thread. `MusicService.onCreate` therefore reads **all** startup preferences once into `startupPrefs` (`runBlocking { dataStore.data.first() }`) and everything after that point must read `startupPrefs!![Key] ?: default`. Adding a `dataStore.get()` back into `onCreate` silently re-introduces a main-thread disk read into the most ANR-sensitive method in the app; ~15 of them were deliberately consolidated away. Outside `onCreate` (in coroutines, callbacks, settings screens) `dataStore.get()` is fine.
+- Unit tests drive coroutine scopes with `Dispatchers.Unconfined`, so a `launch` body starts **inline on the calling thread** instead of being dispatched. Any bug whose trigger is dispatch latency or coroutine start ordering is therefore invisible to the test suite even when the test looks like it covers the code. A real example: a heartbeat liveness check compared two `System.currentTimeMillis()` reads taken either side of a `start()`; under `Unconfined` they always landed in the same millisecond and passed, while production (`Dispatchers.IO`) crossed a millisecond boundary often enough to kill healthy connections. When reasoning about ordering, check what dispatcher production actually uses — do not infer safety from green tests.
 - Generated proto sources are gitignored; never edit `app/src/main/java/com/metrolist/music/listentogether/proto/*` by hand. Edit the `.proto` in the `metroproto` submodule.
 - All library modules already set `isCoreLibraryDesugaringEnabled = true` and target Java 21; new modules should match.
 
