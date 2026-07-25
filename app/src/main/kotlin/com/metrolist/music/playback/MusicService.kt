@@ -1039,6 +1039,10 @@ class MusicService :
                     }
                     return@collectLatest
                 }
+                if (!discordRpcEnabled) {
+                    Timber.tag("DiscordSvc").i("Token change: RPC disabled, skipping")
+                    return@collectLatest
+                }
                 // Never reconnect from here: every write to accessTokenFlow happens inside a flow
                 // that already establishes the connection itself (init/reconnect/refresh/authorize).
                 // Reacting with another reconnect created a feedback loop that killed each fresh
