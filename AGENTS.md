@@ -31,31 +31,9 @@ Consequences that catch people out:
 - The `metrolist.cc` App Link (`autoVerify`) cannot verify for this fork — we own neither the
   domain nor its `assetlinks.json`. Cosmetic only; do not try to "fix" it.
 
-## Where things run
-
-Git source of truth is **WSL**; the Android SDK, builds, `adb` and the authenticated `gh` CLI are
-all **Windows-only**. The same repo is checked out in both places.
-
-| | |
-|---|---|
-| WSL (git, editing) | `/home/matej/dev/kotlin/Metrolist` |
-| Windows (build, `gh`, `adb`) | `C:\Users\matej\dev\kotlin\Metrolist` |
-
-Invoke Windows tooling from WSL like this — note there is **no `-Command` flag**:
-
-```bash
-pwsh "cd C:\Users\matej\dev\kotlin\Metrolist; gh run list --limit 5"
-```
-
-Keep the two clones in sync via `git push` from WSL → `git pull` on Windows.
-
-Test device: OnePlus Nord 4 (`CPH2663`), Android 16, reachable over TCP at
-`adb -s 192.168.0.20:5555`. It may also appear as an mDNS transport — same phone, serial
-`8ef0648d`; pick one or `adb` will error on ambiguity.
-
 ## Signing keys
 
-Neither key is in git. Both live outside the repo on Windows:
+Neither key is in git. Both live outside the repo:
 
 | Key | Path | Purpose |
 |---|---|---|
@@ -105,7 +83,7 @@ Secrets: `KEYSTORE`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`, `DISCORD_
 ## Resolving upstream merge conflicts
 
 Conflicts surface as a **failed nightly mirror run** (the workflow aborts the merge and leaves
-`main` untouched). Resolution is manual, in WSL:
+`main` untouched). Resolution is manual:
 
 ```bash
 git fetch --tags upstream
