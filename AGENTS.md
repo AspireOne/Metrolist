@@ -31,6 +31,22 @@ Consequences that catch people out:
 - The `metrolist.cc` App Link (`autoVerify`) cannot verify for this fork — we own neither the
   domain nor its `assetlinks.json`. Cosmetic only; do not try to "fix" it.
 
+## Deeper docs — `docs/`
+
+`docs/` holds per-feature and per-subsystem documentation: architecture, hard-won gotchas, and
+invariants that are not obvious from the code. This file stays general; `docs/` goes deep.
+
+**Read the relevant document(s) before working in an area they cover** — they exist because the
+context in them was expensive to rediscover. Skip the ones unrelated to the task at hand.
+
+| Document | Covers |
+|---|---|
+| `docs/discord-integration.md` | Discord Rich Presence: OAuth, the gateway client, and the connection-lifecycle invariants |
+
+When you solve something in an area that cost real effort to work out — a non-obvious constraint,
+a bug whose cause was hard to see, a design that looks wrong but isn't — add or update a document
+here rather than letting the next agent rediscover it.
+
 ## Signing keys
 
 Neither key is in git. Both live outside the repo:
@@ -216,39 +232,6 @@ Root `settings.gradle.kts` includes the `:app` plus seven Android-library module
 - `playback/MusicService.kt` — Media3 `MediaLibraryService` (foreground playback).
 - `di/` — Hilt modules; `di/Qualifiers.kt` defines `@ApplicationScope`.
 - `com/dpi/*` — `ContentProvider`s used to hook early init, **not** for content.
-
-## Discord RPC subsystem — invariants
-
-`discord/` plus the Discord blocks in `playback/MusicService.kt`. The connection lifecycle was
-rewritten to fix a permanent deadlock and a token feedback loop (upstream PR #4164). The rules
-below are load-bearing — breaking one reintroduces a bug class that is hard to reproduce and
-was originally only diagnosable from on-device thread dumps.
-
-- **One owner.** `DiscordRpcManager`'s epoch coordinator is the only thing that opens connections:
-  a single worker drains a `ConnectionIntent` queue, and bumping `connectionEpoch` invalidates any
-  in-flight work. Do not add a second path that calls `gateway.connect()`.
-- **Never hold a lock across a suspending or network call.** The previous design awaited the
-  WebSocket handshake inside `reconnectMutex.withLock`; one superseded handshake left the mutex
-  held forever and every later reconnect queued behind it silently, recoverable only by killing
-  the process. `synchronized(coordinatorLock)` blocks must stay non-suspending — capture state,
-  exit, then do I/O.
-- **Never reconnect in reaction to `accessTokenFlow`.** Every write to it already comes from a path
-  that establishes the connection itself. Reacting to it with another reconnect echoed a stale
-  captured token back over a newer one, tearing down working connections in a self-sustaining loop.
-  `MusicService`'s token collector may initialize, never connect.
-- **Gateway sends are connection-scoped.** `identify` / `resume` / `heartbeat` take a `connectionId`
-  and throw `GatewaySupersededException` if that connection is no longer active. `presenceUpdate`
-  is deliberately *not* scoped and relies on the `_ready` guard instead — `beginEstablish()` clears
-  `_ready` under `coordinatorLock` **before** any close/connect, and the presence senders are
-  non-suspending from that check to the send. Keep both halves of that arrangement or scope
-  presence too.
-- **The retry ladder self-arms.** `MAX_RECONNECT_ATTEMPTS` exhaustion is not terminal: an
-  `EnsureConnected` intent arriving from outside a retry resets `reconnectAttempts` /
-  `retryExhausted`, and `syncDiscordState`'s 30s poll supplies exactly that. Presence recovering
-  on its own within ~30s is by design; don't "fix" it with another retry mechanism.
-- Presence-sending paths are all gated on `discordRpcEnabled`, so a connection established while
-  RPC is off broadcasts nothing — but it is still a live authenticated socket with heartbeats.
-  Gate *connecting*, not just sending.
 
 ## Build flags / environment
 
