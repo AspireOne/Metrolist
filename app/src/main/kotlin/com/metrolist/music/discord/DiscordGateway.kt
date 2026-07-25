@@ -493,12 +493,15 @@ class DiscordGateway(
         val jittered = applyJitter(intervalMs, JITTER_RATIO)
         Timber.tag(TAG).i("startHeartbeat: interval=%dms, jittered=%dms", intervalMs, jittered)
         val newJob = externalScope.launch(start = CoroutineStart.LAZY) {
-            var lastSentAt = System.currentTimeMillis()
+            // Stays 0 until the first heartbeat is actually sent: the liveness check below
+            // compares against the last heartbeat we sent, and on the first tick we haven't
+            // sent one yet, so there is no ACK to wait for.
+            var lastSentAt = 0L
             while (isActive && isOpen && connectionId == activeWebSocketId) {
                 delay(jittered)
                 if (!isActive || !isOpen || connectionId != activeWebSocketId) break
                 val lastAck = lastAckAtMs.get()
-                if (lastAck < lastSentAt) {
+                if (lastSentAt > 0L && lastAck < lastSentAt) {
                     Timber.tag(TAG).w("heartbeat: no ACK in %d ms, closing with 4000", jittered)
                     close(connectionId, 4000, "heartbeat timeout")
                     break
