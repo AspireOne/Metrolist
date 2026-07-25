@@ -23,10 +23,20 @@ on:
   push:
     branches:
       - "main"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: >-
+          Upstream ref to mirror (tag or commit). Defaults to the latest upstream release.
+          Pinning an older tag is what makes the conflict resolver rehearsable: branch off
+          main, commit a deliberate collision, and dispatch on that branch with this set.
+        required: false
+        type: string
 
 permissions:
   contents: write
+  # The conflict resolver opens an issue when it cannot produce a merge it can vouch for.
+  issues: write
 
 # Serialize all runs: never let two runs (push/push or push/schedule) race on version
 # numbers, tags, or releases. Queue rather than cancel -- cancelling mid-publish could
@@ -90,36 +100,281 @@ jobs:
         id: mirror
         env:
           GH_TOKEN: ${{ github.token }}
+          UPSTREAM_REF: ${{ inputs.upstream_ref }}
         run: |
-          TAG=$(gh api repos/MetrolistGroup/Metrolist/releases/latest --jq .tag_name)
-          echo "Latest upstream release: $TAG"
+          TAG="${UPSTREAM_REF:-$(gh api repos/MetrolistGroup/Metrolist/releases/latest --jq .tag_name)}"
+          echo "Upstream ref to mirror: $TAG"
+          # Upstream tag (pristine) -- used by the differential test baseline below.
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
           if git merge-base --is-ancestor "$TAG" HEAD 2>/dev/null; then
             echo "Upstream $TAG already in history (no merge needed)."
-          else
-            # Our workflow lives in its own file (fork-release.yml) that upstream has no
-            # counterpart for, so it never conflicts; every other workflow is upstream's,
-            # untouched by us, so it merges cleanly and simply tracks upstream. We keep
-            # those disabled in the GitHub UI rather than fighting them in git.
-            if ! git merge --no-edit "$TAG"; then
-              git merge --abort
-              echo "::error::Merge conflict merging upstream $TAG -- aborted, main left untouched."
-              exit 1
-            fi
+            echo "conflicted=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
+          # Capture the pre-merge tip explicitly: the verifier diffs the fork's deviations
+          # before the merge against those after it, and git only writes ORIG_HEAD once the
+          # merge completes -- which, on the conflict path, it never does.
+          echo "orig_head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+          # Our workflow lives in its own file (fork-release.yml) that upstream has no
+          # counterpart for, so it never conflicts; every other workflow is upstream's,
+          # untouched by us, so it merges cleanly and simply tracks upstream. We keep
+          # those disabled in the GitHub UI rather than fighting them in git.
+          if git merge --no-edit "$TAG"; then
+            echo "conflicted=false" >> "$GITHUB_OUTPUT"
             # The merge may have moved the submodule gitlink; sync the working tree to it.
             git submodule sync --recursive
             git submodule update --init --recursive
+            exit 0
           fi
 
+          # Deliberately NOT aborting. The conflicted tree stays on disk for the resolver
+          # steps below, which own the abort path. Nothing is committed yet and nothing
+          # leaves this runner until the push step far below, so the blast radius of
+          # anything that follows is exactly one wasted CI run.
+          echo "conflicted=true" >> "$GITHUB_OUTPUT"
+
+          # Two lists drive the scope guard: unmerged paths are what the agent is allowed
+          # to touch, cleanly auto-merged paths are what it must leave strictly alone.
+          git diff --name-only --diff-filter=U > conflicted-files.txt
+          git diff --cached --name-only --diff-filter=ACDMRT > clean-merged-files.txt
+          echo "Conflicted files:"; cat conflicted-files.txt
+          echo "::warning::Merge conflict merging upstream $TAG in $(wc -l < conflicted-files.txt) file(s); handing over to the resolver."
+
+      # ---- AI conflict resolution (mirror mode, only when the merge actually conflicted) ----
+
+      - name: Write resolver context
+        if: steps.mirror.outputs.conflicted == 'true'
+        env:
+          UPSTREAM_TAG: ${{ steps.mirror.outputs.tag }}
+          ORIG_HEAD: ${{ steps.mirror.outputs.orig_head }}
+        run: |
+          # The agents need to read these from the workspace (their sandbox is scoped to it),
+          # so they cannot live in $RUNNER_TEMP. Excluding them locally instead keeps them
+          # invisible to git: they can never be committed by accident, and the scope guard's
+          # untracked-file check stays honest without maintaining a list of exceptions.
+          # .git/info/exclude is local to this checkout and is never committed.
+          cat >> .git/info/exclude <<'EOF'
+          /merge-context.md
+          /conflicted-files.txt
+          /clean-merged-files.txt
+          /codex-resolve.md
+          /codex-verify.json
+          /deviations-before.diff
+          /deviations-after.diff
+          /issue-body.md
+          EOF
+
+          # The prompts live in .github/codex/*.md and are static; everything run-specific
+          # is written here so the agents can read it off disk rather than being templated.
+          {
+            echo "# Merge context"
+            echo
+            echo "- Fork: \`$GITHUB_REPOSITORY\` (long-lived fork of \`MetrolistGroup/Metrolist\`)"
+            echo "- Upstream ref being merged: \`$UPSTREAM_TAG\`"
+            echo "- Fork tip before the merge: \`$ORIG_HEAD\`"
+            echo
+            echo "## Conflicted files (you may edit ONLY these)"
+            echo '```'
+            cat conflicted-files.txt
+            echo '```'
+          } > merge-context.md
+          cat merge-context.md
+
+      - name: Resolve conflicts with Codex
+        if: steps.mirror.outputs.conflicted == 'true'
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: .github/codex/resolve.md
+          # Needs to edit the working tree. Writes are confined to the workspace by the
+          # sandbox itself rather than by asking the model nicely in the prompt.
+          sandbox: workspace-write
+          output-file: codex-resolve.md
+
+      - name: Scope guard
+        if: steps.mirror.outputs.conflicted == 'true'
+        run: |
+          fail=0
+
+          # 1) Every conflict must actually be resolved -- no markers left behind.
+          while IFS= read -r f; do
+            [ -n "$f" ] && [ -f "$f" ] || continue
+            if grep -qE '^(<{7}|={7}|>{7})( |$)' "$f"; then
+              echo "::error::Conflict markers still present in $f"
+              fail=1
+            fi
+          done < conflicted-files.txt
+
+          # 2) Files git merged cleanly are out of bounds. This is the blast-radius limit
+          #    on an agent holding edit tools; it encodes nothing about what our patches are.
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            if ! git diff --quiet -- "$f" 2>/dev/null; then
+              echo "::error::Agent modified $f, which git had already merged cleanly (out of scope)."
+              fail=1
+            fi
+          done < clean-merged-files.txt
+
+          # 3) No stray new files. Anything the agent invented is out of scope by definition.
+          #    Our own scratch files are in .git/info/exclude, so they do not show up here.
+          UNTRACKED="$(git ls-files --others --exclude-standard)"
+          if [ -n "$UNTRACKED" ]; then
+            echo "::error::Agent created untracked files: $UNTRACKED"
+            fail=1
+          fi
+
+          exit $fail
+
+      # Deterministic backstop for the agent's self-check. If Codex's sandbox blocked the
+      # network (Gradle needs it -- the build cache is disabled), it could not have compiled
+      # anything itself, so this is the step that actually proves the resolution builds.
+      - name: Verify resolution compiles
+        if: steps.mirror.outputs.conflicted == 'true'
+        env:
+          DISCORD_APP_ID: ${{ secrets.DISCORD_APP_ID }}
+        run: ./gradlew --console=plain :app:compileFossReleaseKotlin --warning-mode summary
+
+      - name: Compute fork deviations before and after the merge
+        if: steps.mirror.outputs.conflicted == 'true'
+        env:
+          UPSTREAM_TAG: ${{ steps.mirror.outputs.tag }}
+          ORIG_HEAD: ${{ steps.mirror.outputs.orig_head }}
+        run: |
+          # What made the fork the fork, relative to the upstream point main was sitting on.
+          BASE="$(git merge-base "$ORIG_HEAD" "$UPSTREAM_TAG")"
+          git diff "$BASE" "$ORIG_HEAD" > deviations-before.diff
+
+          # The same thing relative to the new upstream, read off the resolved working tree
+          # (the merge is not committed yet, so HEAD is still the pre-merge tip).
+          git diff "$UPSTREAM_TAG" > deviations-after.diff
+
+          echo "before: $(wc -l < deviations-before.diff) lines, after: $(wc -l < deviations-after.diff) lines"
+
+      - name: Verify no fork deviation was lost
+        if: steps.mirror.outputs.conflicted == 'true'
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: .github/codex/verify.md
+          # A fresh invocation, so it has no stake in defending the resolution, and
+          # read-only so it cannot "fix" what it finds.
+          sandbox: read-only
+          output-schema: .github/codex/verify-schema.json
+          output-file: codex-verify.json
+
+      - name: Enforce verifier verdict
+        if: steps.mirror.outputs.conflicted == 'true'
+        run: |
+          cat codex-verify.json
+          if [ "$(jq -r '.ok' codex-verify.json)" != "true" ]; then
+            echo "::error::Verifier rejected the resolution: $(jq -r '.reasoning' codex-verify.json)"
+            exit 1
+          fi
+          echo "Verifier accepted the resolution."
+
+      - name: Finalise the AI-resolved merge
+        if: steps.mirror.outputs.conflicted == 'true'
+        id: resolved
+        env:
+          UPSTREAM_TAG: ${{ steps.mirror.outputs.tag }}
+        run: |
+          # -u rather than -A: stage modifications and removals of tracked files only, so a
+          # stray untracked file could never ride along into the merge commit. Files the merge
+          # itself introduced are already staged by git; the conflicted paths are added
+          # explicitly because they are still unmerged in the index.
+          git add -u
+          while IFS= read -r f; do
+            [ -n "$f" ] && [ -e "$f" ] && git add -- "$f"
+          done < conflicted-files.txt
+
+          # Complete the in-progress merge with git's own prepared message plus a provenance
+          # trailer, so anything that came through this path stays auditable in history.
+          # After this commit the tree is indistinguishable from a clean merge, and every
+          # downstream step is unaware anything unusual happened.
+          {
+            cat .git/MERGE_MSG
+            echo
+            echo "Conflicts in this merge were resolved automatically and verified to"
+            echo "preserve the fork's deviations from upstream."
+            echo
+            echo "AI-Resolved-By: openai/codex-action"
+          } > merge-commit-msg.txt
+          git commit -F merge-commit-msg.txt
+          rm -f merge-commit-msg.txt
+
+          git submodule sync --recursive
+          git submodule update --init --recursive
+
+          echo "ai_resolved=true" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Merge conflict resolved automatically"
+            echo
+            echo "Upstream ref: \`$UPSTREAM_TAG\`"
+            echo
+            echo '```'
+            cat conflicted-files.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Single failure handler for every step above: abort the merge so nothing is left
+      # half-applied, and raise an issue -- a failed run only emails you once and is easy to
+      # miss, which would silently stall the nightly mirror.
+      - name: Report unresolved conflict
+        if: failure() && steps.mirror.outputs.conflicted == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_TAG: ${{ steps.mirror.outputs.tag }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          git merge --abort || true
+
+          {
+            echo "The nightly mirror could not merge upstream \`$UPSTREAM_TAG\` automatically."
+            echo "\`main\` was left untouched and nothing was published."
+            echo
+            echo "**Run:** $RUN_URL"
+            echo
+            echo "### Conflicted files"
+            echo '```'
+            cat conflicted-files.txt 2>/dev/null || echo "(unavailable)"
+            echo '```'
+            if [ -f codex-verify.json ]; then
+              echo "### Verifier verdict"
+              echo '```json'
+              cat codex-verify.json
+              echo '```'
+            fi
+            if [ -f codex-resolve.md ]; then
+              echo "### Resolver notes"
+              cat codex-resolve.md
+            fi
+          } > issue-body.md
+
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Mirror blocked: unresolved conflict merging $UPSTREAM_TAG" \
+            --body-file issue-body.md \
+            --label "automated" 2>/dev/null \
+          || gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Mirror blocked: unresolved conflict merging $UPSTREAM_TAG" \
+            --body-file issue-body.md
+
+      - name: Read merged upstream version
+        if: github.event_name != 'push'
+        id: mirror_version
+        run: |
+          # Deliberately its own step: mid-conflict app/build.gradle.kts can contain conflict
+          # markers, so this must not run until the merge is complete (clean or resolved).
           VERSION=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts)
           if [[ ! "$VERSION" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
             echo "::error::Upstream versionName is not a single dotted numeric version."
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          # Upstream tag (pristine) -- used by the differential test baseline below.
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       # ---- Personal mode: interim release of our own commits ----
 
@@ -173,7 +428,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           GH_TOKEN: ${{ github.token }}
-          MIRROR_VERSION: ${{ steps.mirror.outputs.version }}
+          MIRROR_VERSION: ${{ steps.mirror_version.outputs.version }}
           PERSONAL_SKIP: ${{ steps.personal.outputs.skip }}
           PERSONAL_VERSION: ${{ steps.personal.outputs.version }}
         run: |
@@ -441,6 +696,7 @@ jobs:
         if: steps.release.outputs.proceed == 'true'
         env:
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          AI_RESOLVED: ${{ steps.resolved.outputs.ai_resolved }}
         run: |
           VERSION="$RELEASE_VERSION"
           chmod +x .github/scripts/parse_changelog.sh
@@ -456,6 +712,17 @@ jobs:
                 "$(git describe --tags --abbrev=0 2>/dev/null || echo "HEAD~10")..HEAD" \
                 --pretty=format:"- %s" --no-merges || echo "- Initial release"
             } > release_notes.md
+          fi
+
+          # Make an AI-resolved merge visible on the release itself, not just in git history.
+          if [ "$AI_RESOLVED" = "true" ]; then
+            {
+              echo
+              echo "---"
+              echo
+              echo "_Merge conflicts with upstream were resolved automatically for this release,"
+              echo "and verified to preserve this fork's changes._"
+            } >> release_notes.md
           fi
 
       - name: Push merged main

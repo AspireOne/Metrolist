@@ -1,0 +1,38 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ok", "lost_deviations", "reasoning"],
+  "properties": {
+    "ok": {
+      "type": "boolean",
+      "description": "True only if every fork deviation either survived the merge or was legitimately obsoleted by upstream."
+    },
+    "lost_deviations": {
+      "type": "array",
+      "description": "One entry per fork deviation believed lost. Empty when ok is true.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["file", "what_it_did", "why_lost"],
+        "properties": {
+          "file": {
+            "type": "string",
+            "description": "Path of the file the deviation lived in."
+          },
+          "what_it_did": {
+            "type": "string",
+            "description": "What the fork's change accomplished."
+          },
+          "why_lost": {
+            "type": "string",
+            "description": "Why it is believed to have been dropped rather than legitimately obsoleted."
+          }
+        }
+      }
+    },
+    "reasoning": {
+      "type": "string",
+      "description": "Brief readable account of what was compared and how the verdict was reached."
+    }
+  }
+}
