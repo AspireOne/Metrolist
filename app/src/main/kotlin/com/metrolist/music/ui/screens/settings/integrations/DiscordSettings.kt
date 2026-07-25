@@ -105,6 +105,7 @@ import com.metrolist.music.ui.component.Material3SettingsGroup
 import com.metrolist.music.ui.component.Material3SettingsItem
 import com.metrolist.music.ui.utils.backToMain
 import com.metrolist.music.utils.dataStore
+import com.metrolist.music.utils.get
 import com.metrolist.music.utils.makeTimeString
 import com.metrolist.music.utils.safeDataStoreEdit
 import com.metrolist.music.utils.rememberPreference
@@ -195,7 +196,10 @@ fun DiscordSettings(
 
     LaunchedEffect(Unit) {
         if (!DiscordRpcManager.isInitialized()) {
-            DiscordRpcManager.init(context)
+            DiscordRpcManager.init(
+                context,
+                autoReconnect = context.dataStore.get(EnableDiscordRPCKey, true),
+            )
         }
     }
 

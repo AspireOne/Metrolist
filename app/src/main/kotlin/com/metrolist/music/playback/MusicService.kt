@@ -991,8 +991,8 @@ class MusicService :
                 Timber.tag("MusicService").i("Player recreated with AudioTrackPlaybackParams: $useAudioTrackParams")
             }
 
-        // Initialize Discord RPC manager (rehydrates token, reconnects gateway)
-        if (!DiscordRpcManager.isInitialized()) {
+        // Initialize Discord RPC manager only when enabled (rehydrates token, reconnects gateway)
+        if (startupPrefs!![EnableDiscordRPCKey] != false && !DiscordRpcManager.isInitialized()) {
             DiscordRpcManager.init(this@MusicService)
         }
 
@@ -1009,19 +1009,17 @@ class MusicService :
                     if (DiscordRpcManager.isReady()) {
                         Timber.tag("DiscordSvc").i("RPC toggle: already ready, syncing RPC")
                         syncDiscordState()
-                    } else if (DiscordRpcManager.getAccessToken() != null) {
-                        Timber.tag("DiscordSvc").i("RPC toggle: not ready but has token, reconnecting")
+                    } else {
                         scope.launch(Dispatchers.IO) {
                             if (!DiscordRpcManager.isInitialized()) {
                                 Timber.tag("DiscordSvc").i("RPC toggle: initializing")
-                                DiscordRpcManager.init(this@MusicService)
+                                DiscordRpcManager.init(this@MusicService, autoReconnect = false)
                             }
+                            Timber.tag("DiscordSvc").i("RPC toggle: not ready, reconnecting")
                             DiscordRpcManager.reconnect()
                         }
-                    } else {
-                        Timber.tag("DiscordSvc").w("RPC toggle: enabled but no token and not ready")
                     }
-                } else if (DiscordRpcManager.isReady()) {
+                } else if (DiscordRpcManager.isInitialized()) {
                     Timber.tag("DiscordSvc").i("RPC toggle: disabled, disconnecting")
                     scope.launch(Dispatchers.IO) {
                         DiscordRpcManager.disconnect()

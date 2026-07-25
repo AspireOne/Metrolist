@@ -171,7 +171,7 @@ object DiscordRpcManager {
         }
     }
 
-    fun init(context: Context) {
+    fun init(context: Context, autoReconnect: Boolean = true) {
         DiscordTokenStore.init(context.applicationContext)
         if (initialized && scope.isActive) {
             Timber.tag(TAG).i("init: already initialized and active, skipping")
@@ -190,8 +190,14 @@ object DiscordRpcManager {
         scope.launch {
             val saved = DiscordTokenStore.retrieveSuspend()
             if (!saved.isNullOrEmpty()) {
-                Timber.tag(TAG).i("init: found persisted token, reconnecting")
-                reconnect()
+                accessToken = saved
+                _accessTokenFlow.value = saved
+                if (autoReconnect) {
+                    Timber.tag(TAG).i("init: found persisted token, reconnecting")
+                    reconnect()
+                } else {
+                    Timber.tag(TAG).i("init: found persisted token, auto-reconnect disabled")
+                }
             } else {
                 Timber.tag(TAG).i("init: no persisted token, waiting for explicit authorize")
             }
