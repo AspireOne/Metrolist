@@ -133,6 +133,8 @@ fun OnlinePlaylistScreen(
     val isLoadingMore by viewModel.isLoadingMore.collectAsStateWithLifecycle()
     val error by viewModel.error.collectAsStateWithLifecycle()
     val isPodcastPlaylist = viewModel.isPodcastPlaylist
+    val likedSongsCount by viewModel.likedSongsCount.collectAsStateWithLifecycle()
+    val likedSongsTotalDuration by viewModel.likedSongsTotalDuration.collectAsStateWithLifecycle()
 
     val hideExplicit by rememberPreference(key = HideExplicitKey, defaultValue = false)
 
@@ -256,6 +258,8 @@ fun OnlinePlaylistScreen(
                                 coroutineScope = coroutineScope,
                                 continuation = viewModel.continuation,
                                 isPodcastPlaylist = isPodcastPlaylist,
+                                totalSongCount = likedSongsCount,
+                                totalDurationSeconds = likedSongsTotalDuration,
                                 modifier = Modifier.animateItem(),
                             )
                         }
@@ -489,6 +493,8 @@ private fun OnlinePlaylistHeader(
     coroutineScope: CoroutineScope,
     continuation: String?,
     isPodcastPlaylist: Boolean = false,
+    totalSongCount: Int? = null,
+    totalDurationSeconds: Int? = null,
     modifier: Modifier = Modifier,
 ) {
     val navController = LocalNavController.current
@@ -575,15 +581,22 @@ private fun OnlinePlaylistHeader(
             Spacer(modifier = Modifier.height(4.dp))
         }
 
-        // Metadata row - song count, duration
-        val totalDuration = songs.sumOf { it.duration ?: 0 }
+        // Metadata row - song count, duration.
+        //
+        // Prefer locally known totals when we have them (Liked Music): counting the songs loaded
+        // so far would otherwise creep upwards by 100 with every remote page. Those totals are
+        // approximate, hence the tilde.
+        val isApproximate = totalSongCount != null
+        val songCount = totalSongCount ?: songs.size
+        val totalDuration = totalDurationSeconds ?: songs.sumOf { it.duration ?: 0 }
         val nSongs = pluralStringResource(
             if (isPodcastPlaylist) R.plurals.n_episode else R.plurals.n_song,
-            songs.size,
-            songs.size,
+            songCount,
+            songCount,
         )
         val durationText = if (totalDuration > 0) makeTimeString(totalDuration * 1000L) else null
         val metadataText = buildString {
+            if (isApproximate) append("~")
             append(nSongs)
             if (durationText != null) {
                 append(" ")

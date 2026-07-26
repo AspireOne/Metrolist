@@ -24,6 +24,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.stateIn
@@ -45,6 +46,33 @@ class OnlinePlaylistViewModel @Inject constructor(
     // Check if this is a special podcast playlist (with or without VL prefix)
     private val normalizedPlaylistId = playlistId.removePrefix("VL")
     val isPodcastPlaylist = normalizedPlaylistId == "RDPN" || normalizedPlaylistId == "SE"
+    private val isLikedMusicPlaylist = normalizedPlaylistId == "LM"
+
+    /**
+     * Totals for the Liked Music playlist, read from the local database instead of from the
+     * remote pages.
+     *
+     * SyncUtils already mirrors the whole of LM into the song table, so these are available
+     * immediately and offline, rather than creeping upwards as each remote page of 100 arrives.
+     * They can drift from the remote figures by a few songs — a song liked locally may not have
+     * been pushed yet, and a locally disliked song stays liked remotely until the un-like lands —
+     * so the UI marks them as approximate.
+     *
+     * Null for every other playlist, which has no local mirror to count.
+     */
+    val likedSongsCount: StateFlow<Int?> =
+        if (isLikedMusicPlaylist) {
+            database.likedSongsCount().stateIn(viewModelScope, SharingStarted.Lazily, null)
+        } else {
+            MutableStateFlow(null)
+        }
+
+    val likedSongsTotalDuration: StateFlow<Int?> =
+        if (isLikedMusicPlaylist) {
+            database.likedSongsTotalDuration().stateIn(viewModelScope, SharingStarted.Lazily, null)
+        } else {
+            MutableStateFlow(null)
+        }
 
     val playlist = MutableStateFlow<PlaylistItem?>(null)
     val playlistSongs = MutableStateFlow<List<SongItem>>(emptyList())
