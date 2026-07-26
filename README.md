@@ -1,3 +1,25 @@
+> [!NOTE]
+> ### 🎧 A personal Metrolist mix
+>
+> This is my personal, long-term fork of
+> [Metrolist](https://github.com/MetrolistGroup/Metrolist). It stays in step
+> with upstream while giving me a home for a few opinionated changes that make
+> the app work better for me—and that friends are welcome to use too.
+>
+> **What sounds better here:**
+>
+> - 👎 A proper dislike action, including filtering disliked songs out of radio
+>   queues.
+> - 🎮 A reworked Discord Rich Presence integration that displays activity more
+>   reliably and no longer needlessly drains the battery in the background.
+> - ✨ More personal features and bug fixes may join the playlist over time.
+>
+> This is not an official Metrolist distribution. For the original project,
+> documentation, and community support, please visit the
+> [upstream repository](https://github.com/MetrolistGroup/Metrolist). Builds of
+> this fork are available from its
+> [own releases page](https://github.com/AspireOne/Metrolist/releases).
+
 <div align="center">
 
 <img src="https://github.com/MetrolistGroup/Metrolist/blob/main/fastlane/metadata/android/en-US/images/icon.png" alt="Metrolist app icon" width="200" />
