@@ -295,13 +295,17 @@ inline fun ListItem(
     isSelected: Boolean? = false,
     isActive: Boolean = false,
     isAvailable: Boolean = true,
+    // Callers that already sit inside a padded container can flatten these so the row lines up
+    // with its neighbours instead of being inset twice.
+    horizontalPadding: Dp = 8.dp,
+    thumbnailPadding: Dp = 6.dp,
 ) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = if (isActive) {
             modifier // playing highlight
                 .height(ListItemHeight)
-                .padding(horizontal = 8.dp)
+                .padding(horizontal = horizontalPadding)
                 .clip(RoundedCornerShape(8.dp))
                 .background(
                     color = // selected active
@@ -311,17 +315,17 @@ inline fun ListItem(
         } else if (isSelected == true) {
             modifier // inactive selected
                 .height(ListItemHeight)
-                .padding(horizontal = 8.dp)
+                .padding(horizontal = horizontalPadding)
                 .clip(RoundedCornerShape(8.dp))
                 .background(color = MaterialTheme.colorScheme.inversePrimary.copy(alpha = 0.4f))
         } else {
             modifier // default
                 .height(ListItemHeight)
-                .padding(horizontal = 8.dp)
+                .padding(horizontal = horizontalPadding)
         }
     ) {
         Box(
-            modifier = Modifier.padding(6.dp),
+            modifier = Modifier.padding(thumbnailPadding),
             contentAlignment = Alignment.Center
         ) {
             thumbnailContent()
@@ -546,6 +550,8 @@ fun SongListItem(
     isPlaying: Boolean = false,
     isSwipeable: Boolean = true,
     trailingContent: @Composable RowScope.() -> Unit = {},
+    horizontalPadding: Dp = 8.dp,
+    thumbnailPadding: Dp = 6.dp,
 ) {
     val swipeEnabled by rememberPreference(SwipeToSongKey, defaultValue = false)
 
@@ -589,7 +595,9 @@ fun SongListItem(
              trailingContent = trailingContent,
              modifier = modifier,
              isSelected = isSelected,
-             isActive = isActive
+             isActive = isActive,
+             horizontalPadding = horizontalPadding,
+             thumbnailPadding = thumbnailPadding
          )
      }
 
