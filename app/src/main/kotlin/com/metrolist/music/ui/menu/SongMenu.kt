@@ -426,13 +426,20 @@ fun SongMenu(
     SongListItem(
         song = song,
         badges = {},
+        // The sheet already pads its content by 20dp, so the row's own insets only pushed this
+        // header further in than the divider and action grid below it.
+        horizontalPadding = 0.dp,
+        thumbnailPadding = 0.dp,
         trailingContent = {
             // For episodes, show saved state and toggle save for later
             val isEpisode = song.song.isEpisode
             val isFavorite = if (isEpisode) song.song.inLibrary != null else song.song.liked
+            // 40dp rather than the default 48dp: a 24dp icon in a 48dp box leaves 12dp of dead
+            // space on each side, so the pair read as two unrelated controls rather than one.
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (!isEpisode) {
                     IconButton(
+                        modifier = Modifier.size(40.dp),
                         onClick = {
                             // No queue removal here: this song is not necessarily the one playing.
                             // Marking it is enough - the next radio page filters it out.
@@ -457,6 +464,7 @@ fun SongMenu(
                     }
                 }
                 IconButton(
+                    modifier = Modifier.size(40.dp),
                     onClick = {
                         if (isEpisode) {
                             // Episode: toggle save for later (same pattern as songs)
