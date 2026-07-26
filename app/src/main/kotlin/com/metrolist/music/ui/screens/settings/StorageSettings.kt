@@ -90,7 +90,7 @@ fun StorageSettings(
     )
     val (maxSongCacheSize, onMaxSongCacheSizeChange) = rememberPreference(
         key = MaxSongCacheSizeKey,
-        defaultValue = 1024
+        defaultValue = 3072
     )
     val (enableSongCache, onEnableSongCacheChange) = rememberPreference(
         key = EnableSongCacheKey,
@@ -347,7 +347,7 @@ fun StorageSettings(
                     enabled = enableSongCache,
                     description = {
                         val songCacheValues =
-                            remember { listOf(0, 128, 256, 512, 1024, 2048, 4096, 8192, -1) }
+                            remember { listOf(0, 128, 256, 512, 1024, 2048, 3072, 4096, 8192) }
                         Column {
                             Text(
                                 text = when (maxSongCacheSize) {
@@ -357,7 +357,12 @@ fun StorageSettings(
                                 }
                             )
                             Slider(
-                                value = songCacheValues.indexOf(maxSongCacheSize).toFloat(),
+                                value =
+                                    songCacheValues
+                                        .indexOf(maxSongCacheSize)
+                                        .takeIf { it >= 0 }
+                                        ?.toFloat()
+                                        ?: (songCacheValues.size - 1).toFloat(),
                                 enabled = enableSongCache,
                                 onValueChange = {
                                     val newValue = songCacheValues[it.roundToInt()]
