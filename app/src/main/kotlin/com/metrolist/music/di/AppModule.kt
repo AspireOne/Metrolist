@@ -168,7 +168,7 @@ object AppModule {
         databaseProvider: DatabaseProvider,
     ): Cache =
         LazyCache {
-            val cacheSize = context.dataStore[MaxSongCacheSizeKey] ?: 1024
+            val cacheSize = context.dataStore[MaxSongCacheSizeKey] ?: 3072
             val evictor =
                 when (cacheSize) {
                     -1 -> NoOpCacheEvictor()
