@@ -92,7 +92,7 @@ class ListenTogetherManager
         private var volumeObserverJob: Job? = null
         private var playerListenerRegistered = false
 
-        private val syncHostVolumeEnabled = MutableStateFlow(true)
+        private val syncHostVolumeEnabled = MutableStateFlow(false)
         private var lastSyncedVolume: Float? = null
         private var previousMuteState: Boolean? = null
         private var muteForcedByPreference = false
@@ -364,7 +364,7 @@ class ListenTogetherManager
         private fun observePreferences() {
             scope.launch {
                 context.dataStore.data
-                    .map { it[ListenTogetherSyncVolumeKey] ?: true }
+                    .map { it[ListenTogetherSyncVolumeKey] ?: false }
                     .distinctUntilChanged()
                     .collect { enabled ->
                         syncHostVolumeEnabled.value = enabled

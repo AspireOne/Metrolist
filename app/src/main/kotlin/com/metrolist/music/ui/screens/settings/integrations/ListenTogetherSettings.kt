@@ -120,7 +120,7 @@ fun ListenTogetherSettings(
     var username by rememberPreference(ListenTogetherUsernameKey, "")
     var autoApprovalJoins by rememberPreference(ListenTogetherAutoApprovalKey, false)
     var autoApproveSuggestions by rememberPreference(ListenTogetherAutoApproveSuggestionsKey, false)
-    var syncHostVolume by rememberPreference(ListenTogetherSyncVolumeKey, true)
+    var syncHostVolume by rememberPreference(ListenTogetherSyncVolumeKey, false)
 
     var showServerUrlDialog by rememberSaveable { mutableStateOf(false) }
     var showUsernameDialog by rememberSaveable { mutableStateOf(false) }
