@@ -78,8 +78,9 @@ Two modes in one workflow:
 
 - **Mirror** (nightly cron `0 1 * * *`, or `workflow_dispatch`) — merge upstream's latest release
   into `main`, build, publish at upstream's version.
-- **Personal** (push to `main`) — publish an interim release, versioned with a 4th component
-  (`13.6.1` → `13.6.1.3`).
+- **Personal** (push to `main` with `[release]` in the head commit message) — publish an interim
+  release, versioned with a 4th component (`13.6.1` → `13.6.1.3`). Ordinary pushes accumulate
+  without publishing; a later `[release]` commit includes all accumulated changes.
 
 Facts worth knowing before changing anything:
 
@@ -91,7 +92,9 @@ Facts worth knowing before changing anything:
   when reports cannot be parsed (i.e. a compile or Gradle-configuration error).
 - Mirror pushes use `GITHUB_TOKEN`, whose pushes do not trigger workflows — so a mirror run cannot
   trigger a spurious personal release.
-- Use `[skip ci]` for CI-only commits, or every push cuts a release.
+- Use an empty commit to publish accumulated changes without another source edit:
+  `git commit --allow-empty -m "chore: release fork [release]"`.
+- `[skip ci]` suppresses all GitHub Actions and is not needed merely to avoid a release.
 
 Secrets: `KEYSTORE`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`, `DISCORD_APP_ID`,
 `LASTFM_API_KEY`, `LASTFM_SECRET`. Variable: `SIGNING_CERT_SHA256`.
@@ -107,8 +110,9 @@ git merge <upstream-tag>      # resolve, then commit
 git push origin main
 ```
 
-The next scheduled run sees the merge already in history (`git merge-base --is-ancestor`) and
-proceeds straight to building and releasing it. You never drive the release side by hand.
+Push the resolved merge without `[release]`. The next scheduled run—or a manual workflow
+dispatch—sees the merge already in history (`git merge-base --is-ancestor`) and publishes it at
+the bare upstream version. Adding `[release]` instead intentionally makes it a personal release.
 
 ### The governing rule
 
@@ -244,7 +248,7 @@ Root `settings.gradle.kts` includes the `:app` plus seven Android-library module
 ## Gotchas
 
 - `org.json:json` is **globally excluded** (`app/build.gradle.kts:331-333`). The standalone artefact bundles an Apache Harmony `JSONArray` with an internal `myArrayList` field absent from Android's platform `org.json`; R8 inlines against it and crashes with `NoSuchFieldError` at runtime. Don't re-add it.
-- `app/src/main/assets/player_configs.json` and `player_dates.json` are auto-synced from `ZemerTeam/zemer-cipher` by `.github/workflows/sync-player-configs.yml` upstream — but **that workflow is disabled in this fork** (it committed straight to `main`, which would have cut a spurious personal release twice a day). These files therefore only update when a mirror merge brings upstream's committed version across. Don't hand-edit them.
+- `app/src/main/assets/player_configs.json` and `player_dates.json` are auto-synced from `ZemerTeam/zemer-cipher` by `.github/workflows/sync-player-configs.yml` upstream — but **that workflow remains disabled with the other upstream workflows in this fork**. These files therefore only update when a mirror merge brings upstream's committed version across. Don't hand-edit them.
 - `dataStore.get(key)` / `dataStore[key]` do `runBlocking(Dispatchers.IO)` internally — every call is a blocking disk read on the calling thread. `MusicService.onCreate` therefore reads **all** startup preferences once into `startupPrefs` (`runBlocking { dataStore.data.first() }`) and everything after that point must read `startupPrefs!![Key] ?: default`. Adding a `dataStore.get()` back into `onCreate` silently re-introduces a main-thread disk read into the most ANR-sensitive method in the app; ~15 of them were deliberately consolidated away. Outside `onCreate` (in coroutines, callbacks, settings screens) `dataStore.get()` is fine.
 - Unit tests drive coroutine scopes with `Dispatchers.Unconfined`, so a `launch` body starts **inline on the calling thread** instead of being dispatched. Any bug whose trigger is dispatch latency or coroutine start ordering is therefore invisible to the test suite even when the test looks like it covers the code. A real example: a heartbeat liveness check compared two `System.currentTimeMillis()` reads taken either side of a `start()`; under `Unconfined` they always landed in the same millisecond and passed, while production (`Dispatchers.IO`) crossed a millisecond boundary often enough to kill healthy connections. When reasoning about ordering, check what dispatcher production actually uses — do not infer safety from green tests.
 - Generated proto sources are gitignored; never edit `app/src/main/java/com/metrolist/music/listentogether/proto/*` by hand. Edit the `.proto` in the `metroproto` submodule.
@@ -253,4 +257,6 @@ Root `settings.gradle.kts` includes the `:app` plus seven Android-library module
 ## Commit conventions
 
 - Use conventional commits with an optional scope, per repo history (e.g. `fix(sync): resolve playlist duplication`, `chore: update player configs from upstream`). Provide a body explaining root cause and fix. Only stage your own changes.
-- Commit with CI SKIP, by default. Changes should trigger CI only if the user explicitly wants to or if it's justified.
+- Do not add `[skip ci]` merely to suppress a release; ordinary pushes do not publish. Use
+  `[release]` when the pushed head commit should publish, and reserve `[skip ci]` for the uncommon
+  case where all enabled CI should be suppressed.

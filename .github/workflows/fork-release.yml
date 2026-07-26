@@ -3,7 +3,8 @@ name: Sync, Build, and Release
 # Two modes, one workflow:
 #  - schedule / workflow_dispatch -> "mirror" mode: pull in the latest upstream
 #    (MetrolistGroup/Metrolist) release and publish it, with our patches on top.
-#  - push to main -> "personal" mode: publish an interim release of our own commits.
+#  - push to main with [release] in the head commit message -> "personal" mode:
+#    publish an interim release of our own commits. Other pushes skip this job.
 #
 # The merge push in mirror mode uses the default GITHUB_TOKEN, whose pushes never
 # trigger further workflow runs -- so a mirror run can never recursively trigger a
@@ -37,6 +38,9 @@ concurrency:
 
 jobs:
   release:
+    if: >-
+      github.event_name != 'push' ||
+      contains(github.event.head_commit.message, '[release]')
     runs-on: ubuntu-latest
     env:
       # Fork identity, defined once and reused by the build and the verification steps.
