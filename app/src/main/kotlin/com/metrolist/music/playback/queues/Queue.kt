@@ -43,45 +43,43 @@ interface Queue {
         val mediaItemIndex: Int,
         val position: Long = 0L,
     ) {
-        fun filterExplicit(enabled: Boolean = true) =
-            if (enabled) {
-                copy(
-                    items = items.filterExplicit(),
-                )
-            } else {
-                this
-            }
-
-        fun filterVideoSongs(disableVideos: Boolean = false) =
-            if (disableVideos) {
-                copy(
-                    items = items.filterVideoSongs(true),
-                )
-            } else {
-                this
-            }
-
         /**
-         * Unlike the other two filters this has to move [mediaItemIndex], since dropping an item
-         * before the starting position would otherwise silently start playback on the wrong track.
+         * Drops items while keeping [mediaItemIndex] pointing at the same track. Removing an item
+         * before the start position without shifting the index silently begins playback on the
+         * wrong song, so every filter here goes through this.
          *
-         * The item at [mediaItemIndex] is always kept: starting a radio from a song is a deliberate
-         * request to hear that song, even one previously disliked.
+         * @param protectStartItem keeps the item at [mediaItemIndex] whatever [keep] says.
          */
-        fun filterDisliked(dislikedIds: Set<String>): Status {
-            if (dislikedIds.isEmpty()) return this
-
+        private fun filterItems(
+            protectStartItem: Boolean,
+            keep: (MediaItem) -> Boolean,
+        ): Status {
             val kept = ArrayList<MediaItem>(items.size)
             var startIndex = mediaItemIndex
             items.forEachIndexed { index, item ->
-                if (index == mediaItemIndex || item.mediaId !in dislikedIds) {
+                if ((protectStartItem && index == mediaItemIndex) || keep(item)) {
                     kept.add(item)
                 } else if (index < mediaItemIndex) {
                     startIndex--
                 }
             }
-            return copy(items = kept, mediaItemIndex = startIndex)
+            // If the start item itself was dropped, startIndex already lands on whatever now
+            // follows it; clamp for the case where nothing does.
+            return copy(items = kept, mediaItemIndex = startIndex.coerceIn(0, maxOf(0, kept.size - 1)))
         }
+
+        fun filterExplicit(enabled: Boolean = true) =
+            if (enabled) filterItems(protectStartItem = false) { it.metadata?.explicit != true } else this
+
+        fun filterVideoSongs(disableVideos: Boolean = false) =
+            if (disableVideos) filterItems(protectStartItem = false) { it.metadata?.isVideoSong != true } else this
+
+        /**
+         * The item at [mediaItemIndex] survives even when disliked: starting a radio from a song is
+         * a deliberate request to hear that song.
+         */
+        fun filterDisliked(dislikedIds: Set<String>) =
+            if (dislikedIds.isEmpty()) this else filterItems(protectStartItem = true) { it.mediaId !in dislikedIds }
     }
 }
 

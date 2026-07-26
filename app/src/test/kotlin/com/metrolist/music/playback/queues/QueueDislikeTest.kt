@@ -2,6 +2,7 @@ package com.metrolist.music.playback.queues
 
 import androidx.media3.common.MediaItem
 import com.metrolist.innertube.models.WatchEndpoint
+import com.metrolist.music.models.MediaMetadata
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
@@ -150,5 +151,86 @@ class QueueDislikeTest {
 
         assertEquals(listOf("a", "b"), result.items.map { it.mediaId })
         assertEquals(1, result.mediaItemIndex)
+    }
+
+    @Test
+    fun statusFilterDisliked_droppingEverythingButTheSeedLeavesTheIndexInRange() {
+        val result = status(listOf("a", "b"), mediaItemIndex = 1).filterDisliked(setOf("a", "b"))
+
+        assertEquals(listOf("b"), result.items.map { it.mediaId })
+        assertEquals(0, result.mediaItemIndex)
+    }
+
+    @Test
+    fun statusFilterDisliked_indexNeverGoesOutOfRange() {
+        val result = status(listOf("a"), mediaItemIndex = 0).filterDisliked(setOf("a"))
+
+        // The seed survives, so this is really a guard against the clamp misbehaving.
+        assertTrue(result.mediaItemIndex in result.items.indices)
+    }
+
+    private fun taggedItem(
+        id: String,
+        explicit: Boolean = false,
+    ): MediaItem {
+        val meta =
+            MediaMetadata(
+                id = id,
+                title = id,
+                artists = emptyList(),
+                duration = 100,
+                explicit = explicit,
+            )
+        // The uri matters: MediaItem.metadata reads localConfiguration?.tag, and localConfiguration
+        // only exists once a uri is set. Production always sets one (Song.toMediaItem).
+        return MediaItem.Builder().setMediaId(id).setUri(id).setTag(meta).build()
+    }
+
+    @Test
+    fun statusFilterExplicit_shiftsStartIndex() {
+        // Pre-existing bug this filter had: dropping an item before the start position without
+        // moving the index silently began playback on the wrong track.
+        val original =
+            Queue.Status(
+                title = null,
+                items = listOf(taggedItem("a", explicit = true), taggedItem("b"), taggedItem("c")),
+                mediaItemIndex = 2,
+            )
+
+        val result = original.filterExplicit(true)
+
+        assertEquals(listOf("b", "c"), result.items.map { it.mediaId })
+        assertEquals("start index must still point at c", 1, result.mediaItemIndex)
+    }
+
+    @Test
+    fun statusFilterExplicit_droppingTheStartItemLandsOnWhatFollows() {
+        val original =
+            Queue.Status(
+                title = null,
+                items = listOf(taggedItem("a"), taggedItem("b", explicit = true), taggedItem("c")),
+                mediaItemIndex = 1,
+            )
+
+        val result = original.filterExplicit(true)
+
+        assertEquals(listOf("a", "c"), result.items.map { it.mediaId })
+        assertEquals(1, result.mediaItemIndex)
+    }
+
+    @Test
+    fun statusFilters_composeWithoutCorruptingTheIndex() {
+        // The ordering used in playQueue: explicit, then video, then disliked.
+        val original =
+            Queue.Status(
+                title = null,
+                items = listOf(taggedItem("a", explicit = true), taggedItem("b"), taggedItem("c"), taggedItem("d")),
+                mediaItemIndex = 2,
+            )
+
+        val result = original.filterExplicit(true).filterDisliked(setOf("b"))
+
+        assertEquals(listOf("c", "d"), result.items.map { it.mediaId })
+        assertEquals(0, result.mediaItemIndex)
     }
 }

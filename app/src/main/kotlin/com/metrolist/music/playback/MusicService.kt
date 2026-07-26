@@ -466,6 +466,16 @@ class MusicService :
     // Tracks the original queue size to distinguish original items from auto-added ones
     private var originalQueueSize: Int = 0
 
+    /**
+     * Song ids the user chose rather than had generated for them - the album at the head of an
+     * album radio. Dislike marks these but never removes them from the queue.
+     *
+     * Tracked by id rather than by an index boundary because the boundary drifts: nothing updates
+     * it when items are removed or inserted, so generated tracks would slide into the protected
+     * range and become unremovable.
+     */
+    private var userChosenQueueSongIds: Set<String> = emptySet()
+
     private var consecutivePlaybackErr = 0
     private var retryJob: Job? = null
     private var retryCount = 0
@@ -1226,7 +1236,11 @@ class MusicService :
                     }
                 }.onSuccess { queue ->
                     runCatching {
-                        automixItems.value = queue.items.map { it.toMediaItem() }
+                        // Filtered on restore too: these candidates were persisted before the user
+                        // disliked anything, so they would otherwise outlive the dislike. Launched
+                        // because this restore runs outside a coroutine and filtering hits the DB.
+                        val restored = queue.items.map { it.toMediaItem() }
+                        scope.launch { setAutomixItems(restored) }
                     }.onFailure { error ->
                         Timber.tag(TAG).w(error, "Failed to restore automix queue, clearing data")
                         clearPersistedQueueFiles()
@@ -1776,6 +1790,7 @@ class MusicService :
             player.shuffleModeEnabled = false
         }
         originalQueueSize = 0
+        userChosenQueueSongIds = emptySet()
         if (queue.preloadItem != null) {
             player.setMediaItem(queue.preloadItem!!.toMediaItem())
             player.prepare()
@@ -1799,6 +1814,10 @@ class MusicService :
                 queueTitle = initialStatus.title
             }
             if (initialStatus.items.isEmpty()) return@launch
+            // An album radio's opening batch is the album the user picked; remember those ids so a
+            // dislike marks them without pulling them out of the queue.
+            userChosenQueueSongIds =
+                if (queue.hasGeneratedInitialItems) emptySet() else initialStatus.items.mapTo(HashSet()) { it.mediaId }
             // Track original queue size for shuffle playlist first feature
             originalQueueSize = initialStatus.items.size
             if (queue.preloadItem != null) {
@@ -1878,13 +1897,16 @@ class MusicService :
                             item.mediaId != currentMediaId
                         }.filterDisliked(disliked)
 
+                // Trim the old tail whether or not any recommendation survived. currentQueue
+                // becomes the radio below either way, so leaving the previous playlist's tail in
+                // place would let it play on as if it were radio content - and be removed by a
+                // dislike, which is exactly what a non-radio queue is supposed to be safe from.
+                val itemCount = player.mediaItemCount
+                if (itemCount > currentIndex + 1) {
+                    player.removeMediaItems(currentIndex + 1, itemCount)
+                }
+
                 if (radioItems.isNotEmpty()) {
-                    val itemCount = player.mediaItemCount
-
-                    if (itemCount > currentIndex + 1) {
-                        player.removeMediaItems(currentIndex + 1, itemCount)
-                    }
-
                     player.addMediaItems(currentIndex + 1, radioItems)
                     if (player.shuffleModeEnabled) {
                         val shufflePlaylistFirst = dataStore.get(ShufflePlaylistFirstKey, false)
@@ -1893,6 +1915,8 @@ class MusicService :
                 }
 
                 currentQueue = radioQueue
+                // A pure radio generates everything, so nothing in it is user-chosen any more.
+                userChosenQueueSongIds = emptySet()
             } catch (e: Exception) {
                 try {
                     val nextResult =
@@ -1911,6 +1935,9 @@ class MusicService :
                                     .map { it.toMediaItem() }
                                     .filterExplicit(cachedHideExplicit)
                                     .filterVideoSongs(cachedHideVideoSongs)
+                                    // These are generated recommendations too - without this a
+                                    // disliked song returns whenever the primary radio call fails.
+                                    .filterDisliked(withContext(Dispatchers.IO) { database.dislikedSongIds().toSet() })
 
                             if (radioItems.isNotEmpty()) {
                                 val itemCount = player.mediaItemCount
@@ -1944,6 +1971,16 @@ class MusicService :
         }
     }
 
+    /**
+     * Single choke point for every automix source. Automix candidates are generated
+     * recommendations, and the player promotes `automix[0]` straight into the queue once nothing
+     * follows the current track, so a disliked song reaches playback unless it is filtered here.
+     */
+    private suspend fun setAutomixItems(items: List<MediaItem>) {
+        val disliked = withContext(Dispatchers.IO) { database.dislikedSongIds().toSet() }
+        automixItems.value = items.filterDisliked(disliked)
+    }
+
     fun getAutomix(playlistId: String) {
         if (dataStore.get(SimilarContent, true) &&
             !(dataStore.get(DisableLoadMoreWhenRepeatAllKey, false) && player.repeatMode == REPEAT_MODE_ALL)
@@ -1956,16 +1993,18 @@ class MusicService :
                             YouTube
                                 .next(WatchEndpoint(playlistId = firstResult.endpoint.playlistId))
                                 .onSuccess { secondResult ->
-                                    automixItems.value =
+                                    setAutomixItems(
                                         secondResult.items.map { song ->
                                             song.toMediaItem()
-                                        }
+                                        },
+                                    )
                                 }.onFailure {
                                     if (firstResult.items.isNotEmpty()) {
-                                        automixItems.value =
+                                        setAutomixItems(
                                             firstResult.items.map { song ->
                                                 song.toMediaItem()
-                                            }
+                                            },
+                                        )
                                     }
                                 }
                         }.onFailure {
@@ -1983,7 +2022,7 @@ class MusicService :
                                                 .filter { it.id != currentSong.id }
                                                 .map { it.toMediaItem() }
                                         if (filteredItems.isNotEmpty()) {
-                                            automixItems.value = filteredItems
+                                            setAutomixItems(filteredItems)
                                         }
                                     }.onFailure {
                                         YouTube
@@ -1997,7 +2036,7 @@ class MusicService :
                                                             .filter { it.id != currentSong.id }
                                                             .map { it.toMediaItem() }
                                                     if (relatedItems.isNotEmpty()) {
-                                                        automixItems.value = relatedItems
+                                                        setAutomixItems(relatedItems)
                                                     }
                                                 }
                                             }
@@ -2224,13 +2263,22 @@ class MusicService :
         scope.launch {
             val metadata = player.currentMetadata ?: return@launch
 
+            // Resolve strictly by metadata.id. currentSong is a stateIn-cached flow, so just after
+            // a track transition it can still hold the previous song - taking the entity from there
+            // while removing metadata.id from the queue would dislike one song and skip another.
+            // The cache is only reused when it already agrees with the id being acted on.
+            //
             // Unlike toggleLike(), do not silently no-op when the row is missing: it is only
             // inserted once the duration resolves, so there is a window right after a track starts.
+            val cached = currentSong.first()?.song?.takeIf { it.id == metadata.id }
             val existing =
-                currentSong.first()?.song
+                cached
                     ?: withContext(Dispatchers.IO) {
-                        database.insert(metadata)
                         database.songEntity(metadata.id)
+                            ?: run {
+                                database.insert(metadata)
+                                database.songEntity(metadata.id)
+                            }
                     }
                     ?: return@launch
 
@@ -2270,16 +2318,15 @@ class MusicService :
         // is what gets dropped - not the dislike.
         if (listenTogetherManager.isInRoom && !listenTogetherManager.isHost) return
         if (player.mediaItemCount <= 1) return
-
-        // An album radio plays the chosen album first and only then an endless mix. The album sits
-        // in the first originalQueueSize slots and is off limits; everything after it is generated.
-        // A pure radio generates its opening batch too, so nothing there is protected.
-        val protectedPrefix = if (currentQueue.hasGeneratedInitialItems) 0 else originalQueueSize
+        // The album at the head of an album radio is the user's own choice, so it is marked but
+        // never pulled out. Matched by id rather than by an index boundary, which drifts as soon as
+        // anything is added to or removed from the queue.
+        if (songId in userChosenQueueSongIds) return
 
         val currentIndex = player.currentMediaItemIndex
         val indices =
             (0 until player.mediaItemCount)
-                .filter { it >= protectedPrefix && player.getMediaItemAt(it).mediaId == songId }
+                .filter { player.getMediaItemAt(it).mediaId == songId }
         if (indices.isEmpty()) return
         // Never strand the player on an empty timeline; the song stays marked either way.
         if (indices.size >= player.mediaItemCount) return
@@ -2635,11 +2682,20 @@ class MusicService :
                         // nextPage() too, and its tracks were chosen deliberately.
                         val disliked =
                             if (currentQueue.isRadio) database.dislikedSongIds().toSet() else emptySet()
-                        currentQueue
-                            .nextPage()
-                            .filterExplicit(cachedHideExplicit)
-                            .filterVideoSongs(cachedHideVideoSongs)
-                            .filterDisliked(disliked)
+                        // A page can come back entirely filtered. Giving up there would end the
+                        // radio while further pages are still available, so keep asking - bounded,
+                        // since each attempt is a network round trip.
+                        var page = emptyList<MediaItem>()
+                        var attempts = 0
+                        while (page.isEmpty() && attempts < MAX_EMPTY_PAGE_RETRIES && currentQueue.hasNextPage()) {
+                            attempts++
+                            page = currentQueue
+                                .nextPage()
+                                .filterExplicit(cachedHideExplicit)
+                                .filterVideoSongs(cachedHideVideoSongs)
+                                .filterDisliked(disliked)
+                        }
+                        page
                     }
                 if (player.playbackState != STATE_IDLE && mediaItems.isNotEmpty()) {
                     player.addMediaItems(mediaItems)
@@ -4882,6 +4938,9 @@ class MusicService :
         const val EXTRA_ALARM_ID = "extra_alarm_id"
         const val EXTRA_ALARM_PLAYLIST_ID = "extra_alarm_playlist_id"
         const val EXTRA_ALARM_RANDOM_SONG = "extra_alarm_random_song"
+
+        /** How many continuation pages to pull through before accepting that none survive filtering. */
+        private const val MAX_EMPTY_PAGE_RETRIES = 3
 
         const val ROOT = "root"
         const val SONG = "song"

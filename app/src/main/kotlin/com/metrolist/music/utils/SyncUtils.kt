@@ -752,28 +752,30 @@ class SyncUtils @Inject constructor(
                             val timestamp = now.minusSeconds(index.toLong())
                             val isVideoSong = song.isVideoSong
 
+                            // A locally disliked song that is still liked remotely is ambiguous: the
+                            // un-like we sent on disliking may simply not have landed yet (offline,
+                            // logged out, retries exhausted), or the user may have liked it on
+                            // another client. Nothing on the row can tell those apart.
+                            //
+                            // The dislike wins, because the first case is far more likely than
+                            // someone liking a song elsewhere that they just disliked here, and
+                            // because letting the remote win makes a dislike appear to work and
+                            // then silently revert. Re-sending the un-like makes this self-healing:
+                            // it repeats each sync until YouTube accepts it, after which the song
+                            // stops coming back in the remote list at all.
+                            if (dbSong != null && dbSong.disliked) {
+                                likeSong(dbSong.copy(liked = false))
+                                delay(DB_OPERATION_DELAY_MS)
+                                return@forEachIndexed
+                            }
+
                             database.withTransaction {
                                 if (dbSong == null) {
                                     insert(song.toMediaMetadata()) {
                                         it.copy(liked = true, likedDate = timestamp, isVideo = isVideoSong)
                                     }
-                                } else if (!dbSong.liked ||
-                                    dbSong.disliked ||
-                                    dbSong.likedDate != timestamp ||
-                                    dbSong.isVideo != isVideoSong
-                                ) {
-                                    // Liking from another client has to clear a local dislike, or the
-                                    // row ends up both liked and disliked and the song stays excluded
-                                    // from radio queues despite the user having just liked it.
-                                    update(
-                                        dbSong.copy(
-                                            liked = true,
-                                            likedDate = timestamp,
-                                            isVideo = isVideoSong,
-                                            disliked = false,
-                                            dislikedDate = null,
-                                        ),
-                                    )
+                                } else if (!dbSong.liked || dbSong.likedDate != timestamp || dbSong.isVideo != isVideoSong) {
+                                    update(dbSong.copy(liked = true, likedDate = timestamp, isVideo = isVideoSong))
                                 }
                             }
                             delay(DB_OPERATION_DELAY_MS)
