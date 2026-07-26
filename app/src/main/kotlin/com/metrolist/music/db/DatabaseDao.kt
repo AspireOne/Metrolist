@@ -689,6 +689,9 @@ interface DatabaseDao {
     @Query("SELECT * FROM song WHERE id = :songId")
     fun song(songId: String?): Flow<Song?>
 
+    @Query("SELECT id FROM song WHERE disliked")
+    suspend fun dislikedSongIds(): List<String>
+
     @Transaction
     @Query("SELECT * FROM song WHERE id = :songId LIMIT 1")
     suspend fun getSongById(songId: String): Song?
