@@ -180,7 +180,7 @@ fun PlayerSettings(
     )
     val (autoSkipNextOnError, onAutoSkipNextOnErrorChange) = rememberPreference(
         AutoSkipNextOnErrorKey,
-        defaultValue = false
+        defaultValue = true
     )
     val (autoplay, onAutoplayChange) = rememberPreference(
         AutoplayKey,
