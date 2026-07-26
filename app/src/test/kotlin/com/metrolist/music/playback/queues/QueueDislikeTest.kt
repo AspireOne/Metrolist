@@ -61,6 +61,20 @@ class QueueDislikeTest {
     }
 
     @Test
+    fun youTubeQueue_playlistRadioIsRadio() {
+        // "Start radio" on a playlist builds RDAMPL, not RDAMVM (Library.kt).
+        assertTrue(YouTubeQueue(WatchEndpoint(playlistId = "RDAMPLPL123")).isRadio)
+    }
+
+    @Test
+    fun youTubeQueue_serverProvidedRadioFormsAreRadio() {
+        // Artist and station radios come back from the server in other RD forms.
+        for (id in listOf("RDEMabc", "RDAOxyz", "RDCLAK5uy_1", "RDTMAK5uy_2")) {
+            assertTrue("expected $id to be a radio", YouTubeQueue(WatchEndpoint(playlistId = id)).isRadio)
+        }
+    }
+
+    @Test
     fun youTubeQueue_bareVideoIdIsRadio() {
         assertTrue(YouTubeQueue(WatchEndpoint(videoId = "v1")).isRadio)
     }
@@ -79,5 +93,62 @@ class QueueDislikeTest {
     fun youTubeAlbumRadio_isRadio() {
         // True even though getInitialStatus() yields the chosen album: only nextPage() is filtered.
         assertTrue(YouTubeAlbumRadio(playlistId = "OLAK5uy_1").isRadio)
+    }
+
+    @Test
+    fun albumRadio_doesNotGenerateItsInitialItems() {
+        // The pairing that protects the chosen album while still filtering the mix after it.
+        assertTrue(YouTubeAlbumRadio(playlistId = "OLAK5uy_1").isRadio)
+        assertFalse(YouTubeAlbumRadio(playlistId = "OLAK5uy_1").hasGeneratedInitialItems)
+    }
+
+    @Test
+    fun pureRadio_generatesItsInitialItems() {
+        assertTrue(YouTubeQueue(WatchEndpoint(videoId = "v1")).hasGeneratedInitialItems)
+    }
+
+    @Test
+    fun userPlaylist_generatesNothing() {
+        assertFalse(YouTubePlaylistQueue(playlistId = "VLPL123").hasGeneratedInitialItems)
+        assertFalse(ListQueue(items = items("a")).hasGeneratedInitialItems)
+    }
+
+    private fun status(
+        ids: List<String>,
+        mediaItemIndex: Int,
+    ) = Queue.Status(title = null, items = items(*ids.toTypedArray()), mediaItemIndex = mediaItemIndex)
+
+    @Test
+    fun statusFilterDisliked_shiftsStartIndexWhenDroppingEarlierItems() {
+        val result = status(listOf("a", "b", "c", "d"), mediaItemIndex = 2).filterDisliked(setOf("a", "b"))
+
+        assertEquals(listOf("c", "d"), result.items.map { it.mediaId })
+        assertEquals("start index must still point at c", 0, result.mediaItemIndex)
+    }
+
+    @Test
+    fun statusFilterDisliked_leavesStartIndexAloneWhenDroppingLaterItems() {
+        val result = status(listOf("a", "b", "c"), mediaItemIndex = 0).filterDisliked(setOf("c"))
+
+        assertEquals(listOf("a", "b"), result.items.map { it.mediaId })
+        assertEquals(0, result.mediaItemIndex)
+    }
+
+    @Test
+    fun statusFilterDisliked_keepsTheSeedTrackEvenWhenDisliked() {
+        // Starting a radio from a song is a deliberate request to hear that song.
+        val result = status(listOf("a", "b", "c"), mediaItemIndex = 1).filterDisliked(setOf("b", "c"))
+
+        assertEquals(listOf("a", "b"), result.items.map { it.mediaId })
+        assertEquals(1, result.mediaItemIndex)
+    }
+
+    @Test
+    fun statusFilterDisliked_emptySetIsANoOp() {
+        val original = status(listOf("a", "b"), mediaItemIndex = 1)
+        val result = original.filterDisliked(emptySet())
+
+        assertEquals(listOf("a", "b"), result.items.map { it.mediaId })
+        assertEquals(1, result.mediaItemIndex)
     }
 }

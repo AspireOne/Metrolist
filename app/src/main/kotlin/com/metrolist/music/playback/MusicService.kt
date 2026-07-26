@@ -199,9 +199,7 @@ import com.metrolist.music.playback.alarm.MusicAlarmStore
 import com.metrolist.music.playback.audio.SilenceDetectorAudioProcessor
 import com.metrolist.music.playback.queues.EmptyQueue
 import com.metrolist.music.playback.queues.ListQueue
-import com.metrolist.music.playback.queues.LocalAlbumRadio
 import com.metrolist.music.playback.queues.Queue
-import com.metrolist.music.playback.queues.YouTubeAlbumRadio
 import com.metrolist.music.playback.queues.YouTubeQueue
 import com.metrolist.music.playback.queues.YouTubePlaylistQueue
 import com.metrolist.music.playback.queues.filterDisliked
@@ -1786,10 +1784,15 @@ class MusicService :
         scope.launch(SilentHandler) {
             val initialStatus =
                 withContext(Dispatchers.IO) {
+                    // Only a queue whose opening batch is itself generated gets filtered. A
+                    // playlist, an album, or an album radio's album is a deliberate choice.
+                    val disliked =
+                        if (queue.hasGeneratedInitialItems) database.dislikedSongIds().toSet() else emptySet()
                     queue
                         .getInitialStatus()
                         .filterExplicit(dataStore.get(HideExplicitKey, false))
                         .filterVideoSongs(dataStore.get(HideVideoSongsKey, false))
+                        .filterDisliked(disliked)
                 }
             if (queue.preloadItem != null && player.playbackState == STATE_IDLE) return@launch
             if (initialStatus.title != null) {
@@ -1854,6 +1857,7 @@ class MusicService :
                 )
 
             try {
+                val disliked = withContext(Dispatchers.IO) { database.dislikedSongIds().toSet() }
                 val initialStatus =
                     withContext(Dispatchers.IO) {
                         radioQueue
@@ -1866,10 +1870,13 @@ class MusicService :
                     queueTitle = initialStatus.title
                 }
 
+                // Filtered on the plain list rather than the status: the seed track is dropped
+                // here anyway and stays put as the current item, so no index needs adjusting.
                 val radioItems =
-                    initialStatus.items.filter { item ->
-                        item.mediaId != currentMediaId
-                    }
+                    initialStatus.items
+                        .filter { item ->
+                            item.mediaId != currentMediaId
+                        }.filterDisliked(disliked)
 
                 if (radioItems.isNotEmpty()) {
                     val itemCount = player.mediaItemCount
@@ -2258,12 +2265,16 @@ class MusicService :
      */
     private fun removeDislikedFromQueue(songId: String) {
         if (!currentQueue.isRadio) return
+        // A Listen Together guest shares the host's queue. Marking the song is theirs to do, but
+        // mutating the queue would advance them independently and desync the room, so the removal
+        // is what gets dropped - not the dislike.
+        if (listenTogetherManager.isInRoom && !listenTogetherManager.isHost) return
         if (player.mediaItemCount <= 1) return
 
         // An album radio plays the chosen album first and only then an endless mix. The album sits
         // in the first originalQueueSize slots and is off limits; everything after it is generated.
-        val protectedPrefix =
-            if (currentQueue is YouTubeAlbumRadio || currentQueue is LocalAlbumRadio) originalQueueSize else 0
+        // A pure radio generates its opening batch too, so nothing there is protected.
+        val protectedPrefix = if (currentQueue.hasGeneratedInitialItems) 0 else originalQueueSize
 
         val currentIndex = player.currentMediaItemIndex
         val indices =

@@ -757,8 +757,23 @@ class SyncUtils @Inject constructor(
                                     insert(song.toMediaMetadata()) {
                                         it.copy(liked = true, likedDate = timestamp, isVideo = isVideoSong)
                                     }
-                                } else if (!dbSong.liked || dbSong.likedDate != timestamp || dbSong.isVideo != isVideoSong) {
-                                    update(dbSong.copy(liked = true, likedDate = timestamp, isVideo = isVideoSong))
+                                } else if (!dbSong.liked ||
+                                    dbSong.disliked ||
+                                    dbSong.likedDate != timestamp ||
+                                    dbSong.isVideo != isVideoSong
+                                ) {
+                                    // Liking from another client has to clear a local dislike, or the
+                                    // row ends up both liked and disliked and the song stays excluded
+                                    // from radio queues despite the user having just liked it.
+                                    update(
+                                        dbSong.copy(
+                                            liked = true,
+                                            likedDate = timestamp,
+                                            isVideo = isVideoSong,
+                                            disliked = false,
+                                            dislikedDate = null,
+                                        ),
+                                    )
                                 }
                             }
                             delay(DB_OPERATION_DELAY_MS)

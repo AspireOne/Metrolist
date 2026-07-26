@@ -22,6 +22,15 @@ interface Queue {
      */
     val isRadio: Boolean get() = false
 
+    /**
+     * True when [getInitialStatus] itself returns generated recommendations rather than something
+     * the user chose, which is what decides whether the opening batch is filtered.
+     *
+     * Separate from [isRadio] because the album radios are both at once: their opening batch is the
+     * album the user picked, and only what follows is generated.
+     */
+    val hasGeneratedInitialItems: Boolean get() = false
+
     suspend fun getInitialStatus(): Status
 
     fun hasNextPage(): Boolean
@@ -51,6 +60,28 @@ interface Queue {
             } else {
                 this
             }
+
+        /**
+         * Unlike the other two filters this has to move [mediaItemIndex], since dropping an item
+         * before the starting position would otherwise silently start playback on the wrong track.
+         *
+         * The item at [mediaItemIndex] is always kept: starting a radio from a song is a deliberate
+         * request to hear that song, even one previously disliked.
+         */
+        fun filterDisliked(dislikedIds: Set<String>): Status {
+            if (dislikedIds.isEmpty()) return this
+
+            val kept = ArrayList<MediaItem>(items.size)
+            var startIndex = mediaItemIndex
+            items.forEachIndexed { index, item ->
+                if (index == mediaItemIndex || item.mediaId !in dislikedIds) {
+                    kept.add(item)
+                } else if (index < mediaItemIndex) {
+                    startIndex--
+                }
+            }
+            return copy(items = kept, mediaItemIndex = startIndex)
+        }
     }
 }
 
