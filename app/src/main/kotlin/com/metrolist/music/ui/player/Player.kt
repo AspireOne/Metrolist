@@ -1123,7 +1123,7 @@ fun BottomSheetPlayer(
                 Spacer(modifier = Modifier.width(12.dp))
 
                 if (useNewPlayerDesign) {
-                    val shareShape =
+                    val leadingShape =
                         RoundedCornerShape(
                             topStart = 50.dp,
                             bottomStart = 50.dp,
@@ -1141,10 +1141,45 @@ fun BottomSheetPlayer(
 
                     val middleShape = RoundedCornerShape(3.dp)
 
+                    // Podcast episodes have no dislike, so the group drops back to two segments
+                    // and share takes the leading pill again.
+                    val isEpisode = currentSong?.song?.isEpisode == true
+                    val shareShape = if (isEpisode) leadingShape else middleShape
+
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
+                        if (!isEpisode) {
+                            val isDisliked = currentSong?.song?.disliked == true
+                            // Deliberately not wrapped in AnimatedContent, unlike its two
+                            // neighbours: dislike is song state, not view state, so it stays put
+                            // when lyrics or fullscreen are showing.
+                            FilledIconButton(
+                                onClick = playerConnection::toggleDislike,
+                                shape = leadingShape,
+                                colors =
+                                    IconButtonDefaults.filledIconButtonColors(
+                                        containerColor = textButtonColor,
+                                        contentColor = iconButtonColor,
+                                    ),
+                                modifier = Modifier.size(42.dp),
+                            ) {
+                                Icon(
+                                    painter =
+                                        painterResource(
+                                            if (isDisliked) {
+                                                R.drawable.heart_broken
+                                            } else {
+                                                R.drawable.heart_broken_border
+                                            },
+                                        ),
+                                    contentDescription = stringResource(R.string.dislike),
+                                    modifier = Modifier.size(24.dp),
+                                )
+                            }
+                        }
+
                         AnimatedContent(targetState = showInlineLyrics, label = "ShareButton") { showLyrics ->
                             if (showLyrics) {
                                 FilledIconButton(
@@ -1231,7 +1266,6 @@ fun BottomSheetPlayer(
                                 }
                             } else {
                                 // For episodes, show saved state (inLibrary); for songs, show liked state
-                                val isEpisode = currentSong?.song?.isEpisode == true
                                 val isFavorite = if (isEpisode) currentSong?.song?.inLibrary != null else currentSong?.song?.liked == true
                                 FilledIconButton(
                                     onClick = playerConnection::toggleLike,
