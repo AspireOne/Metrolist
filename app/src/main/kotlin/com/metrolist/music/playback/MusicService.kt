@@ -3823,6 +3823,32 @@ class MusicService :
                     recoverSongDeduped(mediaId)
                     return@Factory dataSpec.withUri(it.first.toUri())
                 }
+
+                // Partially cached, with no usable stream URL in hand: serve the cached run and
+                // stop exactly at its edge instead of blocking playback on a stream resolve.
+                // The isCached() checks above ask whether the *entire* remainder is cached, so a
+                // song that was never played through to the end always missed and paid a full
+                // resolve before the first sample — despite most of its audio already being on
+                // disk. Measured on device: ~950ms warm, several seconds cold.
+                //
+                // The returned spec must be bounded. A MediaItem's URI here is only the videoId
+                // (see Song.toMediaItem), not a real URL, so handing back an unbounded spec would
+                // leave CacheDataSource with nothing to fall back to the moment the cached run
+                // ran out. Bounded, the cache satisfies the whole read; ExoPlayer then reopens at
+                // the edge and resolves there, by which point audio is playing and the resolve is
+                // hidden behind the buffer rather than sitting in front of it.
+                //
+                // Only worth doing for a run of at least one chunk — bounding to a few stray
+                // bytes would just churn open/EOF cycles.
+                val cachedRun =
+                    maxOf(
+                        downloadCache.getCachedLength(mediaId, dataSpec.position, requiredLength),
+                        if (usePlayerCache) playerCache.getCachedLength(mediaId, dataSpec.position, requiredLength) else 0L,
+                    )
+                if (cachedRun >= CHUNK_LENGTH) {
+                    recoverSongDeduped(mediaId)
+                    return@Factory dataSpec.buildUpon().setLength(cachedRun).build()
+                }
             } else {
                 Timber.tag(TAG).i("BYPASSING CACHE for $mediaId due to quality change")
             }
