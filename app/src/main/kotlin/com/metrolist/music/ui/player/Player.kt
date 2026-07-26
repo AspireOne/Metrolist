@@ -1123,7 +1123,7 @@ fun BottomSheetPlayer(
                 Spacer(modifier = Modifier.width(12.dp))
 
                 if (useNewPlayerDesign) {
-                    val shareShape =
+                    val leadingShape =
                         RoundedCornerShape(
                             topStart = 50.dp,
                             bottomStart = 50.dp,
@@ -1141,56 +1141,69 @@ fun BottomSheetPlayer(
 
                     val middleShape = RoundedCornerShape(3.dp)
 
+                    // A lone button is a full pill rather than half of a group.
+                    val soloShape = RoundedCornerShape(50.dp)
+
+                    // Podcast episodes have no dislike.
+                    val isEpisode = currentSong?.song?.isEpisode == true
+
+                    // Share lives in the overflow menu instead of this row: a third permanent
+                    // segment cost the title 48dp of width, about a quarter of it. The middle slot
+                    // now only exists while lyrics are showing, where it carries the fullscreen
+                    // toggle that used to share a slot with the share button.
+                    val fullscreenSlotShape = if (isEpisode) leadingShape else middleShape
+                    val trailingShape = if (isEpisode && !showInlineLyrics) soloShape else favShape
+
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        AnimatedContent(targetState = showInlineLyrics, label = "ShareButton") { showLyrics ->
-                            if (showLyrics) {
-                                FilledIconButton(
-                                    onClick = { isFullScreen = !isFullScreen },
-                                    shape = shareShape,
-                                    colors =
-                                        IconButtonDefaults.filledIconButtonColors(
-                                            containerColor = textButtonColor,
-                                            contentColor = iconButtonColor,
+                        if (!isEpisode) {
+                            val isDisliked = currentSong?.song?.disliked == true
+                            // Deliberately not wrapped in AnimatedContent, unlike its two
+                            // neighbours: dislike is song state, not view state, so it stays put
+                            // when lyrics or fullscreen are showing.
+                            FilledIconButton(
+                                onClick = playerConnection::toggleDislike,
+                                shape = leadingShape,
+                                colors =
+                                    IconButtonDefaults.filledIconButtonColors(
+                                        containerColor = textButtonColor,
+                                        contentColor = iconButtonColor,
+                                    ),
+                                modifier = Modifier.size(42.dp),
+                            ) {
+                                Icon(
+                                    painter =
+                                        painterResource(
+                                            if (isDisliked) {
+                                                R.drawable.heart_broken
+                                            } else {
+                                                R.drawable.heart_broken_border
+                                            },
                                         ),
-                                    modifier = Modifier.size(42.dp),
-                                ) {
-                                    Icon(
-                                        painter = painterResource(R.drawable.fullscreen),
-                                        contentDescription = null,
-                                        modifier = Modifier.size(24.dp),
-                                    )
-                                }
-                            } else {
-                                FilledIconButton(
-                                    onClick = {
-                                        val intent =
-                                            Intent().apply {
-                                                action = Intent.ACTION_SEND
-                                                type = "text/plain"
-                                                putExtra(
-                                                    Intent.EXTRA_TEXT,
-                                                    "https://music.youtube.com/watch?v=${mediaMetadata.id}",
-                                                )
-                                            }
-                                        context.startActivity(Intent.createChooser(intent, null))
-                                    },
-                                    shape = shareShape,
-                                    colors =
-                                        IconButtonDefaults.filledIconButtonColors(
-                                            containerColor = textButtonColor,
-                                            contentColor = iconButtonColor,
-                                        ),
-                                    modifier = Modifier.size(42.dp),
-                                ) {
-                                    Icon(
-                                        painter = painterResource(R.drawable.share),
-                                        contentDescription = null,
-                                        modifier = Modifier.size(24.dp),
-                                    )
-                                }
+                                    contentDescription = stringResource(R.string.dislike),
+                                    modifier = Modifier.size(24.dp),
+                                )
+                            }
+                        }
+
+                        if (showInlineLyrics) {
+                            FilledIconButton(
+                                onClick = { isFullScreen = !isFullScreen },
+                                shape = fullscreenSlotShape,
+                                colors =
+                                    IconButtonDefaults.filledIconButtonColors(
+                                        containerColor = textButtonColor,
+                                        contentColor = iconButtonColor,
+                                    ),
+                                modifier = Modifier.size(42.dp),
+                            ) {
+                                Icon(
+                                    painter = painterResource(R.drawable.fullscreen),
+                                    contentDescription = stringResource(R.string.fullscreen),
+                                    modifier = Modifier.size(24.dp),
+                                )
                             }
                         }
 
@@ -1215,7 +1228,7 @@ fun BottomSheetPlayer(
                                             )
                                         }
                                     },
-                                    shape = favShape,
+                                    shape = trailingShape,
                                     colors =
                                         IconButtonDefaults.filledIconButtonColors(
                                             containerColor = textButtonColor,
@@ -1231,11 +1244,10 @@ fun BottomSheetPlayer(
                                 }
                             } else {
                                 // For episodes, show saved state (inLibrary); for songs, show liked state
-                                val isEpisode = currentSong?.song?.isEpisode == true
                                 val isFavorite = if (isEpisode) currentSong?.song?.inLibrary != null else currentSong?.song?.liked == true
                                 FilledIconButton(
                                     onClick = playerConnection::toggleLike,
-                                    shape = favShape,
+                                    shape = trailingShape,
                                     colors =
                                         IconButtonDefaults.filledIconButtonColors(
                                             containerColor = textButtonColor,

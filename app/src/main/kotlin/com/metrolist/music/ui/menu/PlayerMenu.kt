@@ -381,6 +381,32 @@ fun PlayerMenu(
                                 onDismiss()
                             },
                         ),
+                        // Moved out of the player's button row: a third segment there cost the
+                        // song title a quarter of its width. Sits next to Copy link, same job.
+                        NewAction(
+                            icon = {
+                                Icon(
+                                    painter = painterResource(R.drawable.share),
+                                    contentDescription = null,
+                                    modifier = Modifier.size(32.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            },
+                            text = stringResource(R.string.share),
+                            onClick = {
+                                onDismiss()
+                                val intent =
+                                    Intent().apply {
+                                        action = Intent.ACTION_SEND
+                                        type = "text/plain"
+                                        putExtra(
+                                            Intent.EXTRA_TEXT,
+                                            "https://music.youtube.com/watch?v=${mediaMetadata.id}",
+                                        )
+                                    }
+                                context.startActivity(Intent.createChooser(intent, null))
+                            },
+                        ),
                     ),
                 columns = if (isListenTogetherGuest) 2 else 3,
                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 16.dp),

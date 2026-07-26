@@ -752,6 +752,23 @@ class SyncUtils @Inject constructor(
                             val timestamp = now.minusSeconds(index.toLong())
                             val isVideoSong = song.isVideoSong
 
+                            // A locally disliked song that is still liked remotely is ambiguous: the
+                            // un-like we sent on disliking may simply not have landed yet (offline,
+                            // logged out, retries exhausted), or the user may have liked it on
+                            // another client. Nothing on the row can tell those apart.
+                            //
+                            // The dislike wins, because the first case is far more likely than
+                            // someone liking a song elsewhere that they just disliked here, and
+                            // because letting the remote win makes a dislike appear to work and
+                            // then silently revert. Re-sending the un-like makes this self-healing:
+                            // it repeats each sync until YouTube accepts it, after which the song
+                            // stops coming back in the remote list at all.
+                            if (dbSong != null && dbSong.disliked) {
+                                likeSong(dbSong.copy(liked = false))
+                                delay(DB_OPERATION_DELAY_MS)
+                                return@forEachIndexed
+                            }
+
                             database.withTransaction {
                                 if (dbSong == null) {
                                     insert(song.toMediaMetadata()) {

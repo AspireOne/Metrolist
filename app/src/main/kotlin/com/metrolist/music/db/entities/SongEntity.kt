@@ -64,6 +64,10 @@ data class SongEntity(
     val uploadEntityId: String? = null,
     @ColumnInfo(name = "isCached", defaultValue = "0")
     val isCached: Boolean = false,
+    @ColumnInfo(name = "disliked", defaultValue = "0")
+    val disliked: Boolean = false,
+    @ColumnInfo(name = "dislikedDate", defaultValue = "NULL")
+    val dislikedDate: LocalDateTime? = null,
 ) {
     fun localToggleLike() =
         copy(
@@ -76,11 +80,33 @@ data class SongEntity(
             liked = !liked,
             likedDate = if (!liked) LocalDateTime.now() else null,
             inLibrary = if (!liked) inLibrary ?: LocalDateTime.now() else inLibrary,
+            // Liked and disliked are opposite poles of one axis: becoming liked clears a dislike.
+            disliked = if (!liked) false else disliked,
+            dislikedDate = if (!liked) null else dislikedDate,
         ).also {
             CoroutineScope(Dispatchers.IO).launch {
                 YouTube.likeVideo(id, !liked)
             }
         }
+
+    /**
+     * Dislike is a local-only signal: YouTube's API exposes no dislike/rate endpoint, and the flag
+     * exists to keep songs out of radio queues rather than to express anything to YouTube.
+     *
+     * Deliberately has no `.also { ... }` remote call, unlike [toggleLike]. When a dislike clears an
+     * existing like, that un-like still has to reach YouTube or the next liked-songs sync restores
+     * it - but that push has to go through `SyncUtils` (retry, login guard, Last.fm love clearing),
+     * which an entity cannot reach. Call sites are responsible for it.
+     */
+    fun localToggleDislike() =
+        copy(
+            disliked = !disliked,
+            dislikedDate = if (!disliked) LocalDateTime.now() else null,
+            liked = if (!disliked) false else liked,
+            likedDate = if (!disliked) null else likedDate,
+        )
+
+    fun toggleDislike() = localToggleDislike()
 
     fun toggleLibrary(syncToYouTube: Boolean = true) =
         copy(

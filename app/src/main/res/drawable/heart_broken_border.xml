@@ -1,0 +1,17 @@
+<!--
+  Outlined broken heart. First two subpaths are the verified ring from favorite_border.xml; the
+  third is the crack. With evenOdd the ring renders unchanged (crossing parity is direction
+  independent) and the crack lands on an odd crossing count inside the hollow, so it draws solid.
+  Kept shorter than the filled variant's crack so it stays inside the hollow and does not notch
+  the outline.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24.0"
+    android:viewportHeight="24.0">
+    <path
+        android:fillColor="@android:color/white"
+        android:fillType="evenOdd"
+        android:pathData="M16.5,3c-1.74,0 -3.41,0.81 -4.5,2.09C10.91,3.81 9.24,3 7.5,3 4.42,3 2,5.42 2,8.5c0,3.78 3.4,6.86 8.55,11.54L12,21.35l1.45,-1.32C18.6,15.36 22,12.28 22,8.5 22,5.42 19.58,3 16.5,3zM12.1,18.55l-0.1,0.1 -0.1,-0.1C7.14,14.24 4,11.39 4,8.5 4,6.5 5.5,5 7.5,5c1.54,0 3.04,0.99 3.57,2.36h1.87C13.46,5.99 14.96,5 16.5,5c2,0 3.5,1.5 3.5,3.5 0,2.89 -3.14,5.74 -7.9,10.05zM11.25,4.4L9.65,10 11.85,11.8 10.15,15.9 12.15,17.4 11.25,20.8 12.75,20.8 13.65,17.4 11.65,15.9 13.35,11.8 11.15,10 12.75,4.4z" />
+</vector>

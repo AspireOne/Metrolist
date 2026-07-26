@@ -1,0 +1,15 @@
+<!--
+  Filled broken heart. The heart outline is the verified path from favorite.xml; the second
+  subpath is a zigzag crack punched out of it with evenOdd fill, so the two icons share exactly
+  the same silhouette and optical weight when they sit side by side in the player.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24.0"
+    android:viewportHeight="24.0">
+    <path
+        android:fillColor="@android:color/white"
+        android:fillType="evenOdd"
+        android:pathData="M12,21.35l-1.45,-1.32C5.4,15.36 2,12.28 2,8.5 2,5.42 4.42,3 7.5,3c1.74,0 3.41,0.81 4.5,2.09C13.09,3.81 14.76,3 16.5,3 19.58,3 22,5.42 22,8.5c0,3.78 -3.4,6.86 -8.55,11.54L12,21.35zM11.25,4.4L9.65,10 11.85,11.8 10.15,15.9 12.15,17.4 11.25,20.8 12.75,20.8 13.65,17.4 11.65,15.9 13.35,11.8 11.15,10 12.75,4.4z" />
+</vector>

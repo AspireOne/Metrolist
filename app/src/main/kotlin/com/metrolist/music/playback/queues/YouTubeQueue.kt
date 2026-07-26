@@ -17,6 +17,20 @@ class YouTubeQueue(
     private var endpoint: WatchEndpoint,
     override val preloadItem: MediaMetadata? = null,
 ) : Queue {
+    // Captured at construction on purpose: `endpoint` is reassigned while paging, and the RD
+    // prefix is gone by the time nextPage() runs, so computing this lazily would answer wrongly.
+    //
+    // Every generated mix uses an RD* playlist, not just the RDAMVM song radios: playlist radio is
+    // RDAMPL, and the server hands back further RD forms for artist and station radios. Matching on
+    // the RD prefix is the same test the rest of the app uses to spot a radio (HomeViewModel).
+    override val isRadio: Boolean =
+        endpoint.playlistId?.startsWith("RD") == true ||
+            (endpoint.videoId != null && endpoint.playlistId == null)
+
+    // A pure radio generates its opening batch too, unlike an album radio which plays the chosen
+    // album first. Governs whether the initial status is filtered.
+    override val hasGeneratedInitialItems: Boolean get() = isRadio
+
     private var continuation: String? = null
     private var retryCount = 0
     private val maxRetries = 3
@@ -34,18 +48,22 @@ class YouTubeQueue(
                 )
             }
 
-            val isRadioRequest =
+            // Deliberately narrower than isRadio, and deliberately unchanged: this only gates the
+            // empty-radio recovery below, which was written for song radios. Letting the broader
+            // isRadio in here would newly route playlist and artist radios down the related-songs
+            // fallback, which is a change to existing behaviour and not what this feature is about.
+            val isVideoRadioRequest =
                 endpoint.playlistId?.startsWith("RDAMVM") == true ||
-                (endpoint.videoId != null && endpoint.playlistId == null)
+                    (endpoint.videoId != null && endpoint.playlistId == null)
 
             for (attempt in 0..maxRetries) {
                 try {
                     val nextResult = YouTube.next(endpoint, continuation).getOrThrow()
-                    
+
                     var items = nextResult.items
                     val relEndpoint = nextResult.relatedEndpoint
-                    
-                    if (isRadioRequest && continuation == null && items.size <= 1) {
+
+                    if (isVideoRadioRequest && continuation == null && items.size <= 1) {
                         if (endpoint.playlistId?.startsWith("RDAMVM") == true) {
                             throw EmptyRadioQueueException()
                         } else if (relEndpoint != null) {
