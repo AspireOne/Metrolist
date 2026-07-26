@@ -199,9 +199,12 @@ import com.metrolist.music.playback.alarm.MusicAlarmStore
 import com.metrolist.music.playback.audio.SilenceDetectorAudioProcessor
 import com.metrolist.music.playback.queues.EmptyQueue
 import com.metrolist.music.playback.queues.ListQueue
+import com.metrolist.music.playback.queues.LocalAlbumRadio
 import com.metrolist.music.playback.queues.Queue
+import com.metrolist.music.playback.queues.YouTubeAlbumRadio
 import com.metrolist.music.playback.queues.YouTubeQueue
 import com.metrolist.music.playback.queues.YouTubePlaylistQueue
+import com.metrolist.music.playback.queues.filterDisliked
 import com.metrolist.music.playback.queues.filterExplicit
 import com.metrolist.music.playback.queues.filterVideoSongs
 import com.metrolist.music.constants.LoudnessLevel
@@ -2205,6 +2208,84 @@ class MusicService :
         }
     }
 
+    /**
+     * Marks the current song disliked (or clears it), and drops it from the queue when that queue is
+     * a radio. Dislike itself never reaches YouTube - there is no dislike endpoint - but if the song
+     * was liked, the resulting un-like must be pushed, or the next liked-songs sync restores it.
+     */
+    fun toggleDislike() {
+        scope.launch {
+            val metadata = player.currentMetadata ?: return@launch
+
+            // Unlike toggleLike(), do not silently no-op when the row is missing: it is only
+            // inserted once the duration resolves, so there is a window right after a track starts.
+            val existing =
+                currentSong.first()?.song
+                    ?: withContext(Dispatchers.IO) {
+                        database.insert(metadata)
+                        database.songEntity(metadata.id)
+                    }
+                    ?: return@launch
+
+            // Podcast episodes have no dislike concept, same carve-out as toggleLike().
+            if (existing.isEpisode) return@launch
+
+            val wasLiked = existing.liked
+            val updated = existing.toggleDislike()
+
+            database.query {
+                update(updated)
+            }
+            if (wasLiked && !updated.liked) {
+                syncUtils.likeSong(updated)
+                updateNotification(isLiked = false)
+                updateWidgetUI(player.isPlaying, isLiked = false)
+            }
+
+            if (updated.disliked) {
+                removeDislikedFromQueue(metadata.id)
+            }
+
+            currentMediaMetadata.value = player.currentMetadata
+        }
+    }
+
+    /**
+     * Removes every copy of [songId] from the playing queue, but only for radio queues - a playlist,
+     * album or explicit selection was chosen deliberately and is left alone.
+     *
+     * Runs on the main thread (scope is Dispatchers.Main) because ExoPlayer is not thread-safe.
+     */
+    private fun removeDislikedFromQueue(songId: String) {
+        if (!currentQueue.isRadio) return
+        if (player.mediaItemCount <= 1) return
+
+        // An album radio plays the chosen album first and only then an endless mix. The album sits
+        // in the first originalQueueSize slots and is off limits; everything after it is generated.
+        val protectedPrefix =
+            if (currentQueue is YouTubeAlbumRadio || currentQueue is LocalAlbumRadio) originalQueueSize else 0
+
+        val currentIndex = player.currentMediaItemIndex
+        val indices =
+            (0 until player.mediaItemCount)
+                .filter { it >= protectedPrefix && player.getMediaItemAt(it).mediaId == songId }
+        if (indices.isEmpty()) return
+        // Never strand the player on an empty timeline; the song stays marked either way.
+        if (indices.size >= player.mediaItemCount) return
+
+        // Descending, or each removal shifts the indices still to be removed.
+        indices.sortedDescending().forEach { player.removeMediaItem(it) }
+
+        // Deliberately no applyShuffleOrder() here: it rebuilds the whole order from scratch, which
+        // would re-randomise the upcoming queue as a side effect of a dislike. DefaultShuffleOrder
+        // already handles removals internally. This matches the existing removal paths, which also
+        // skip it, rather than the insertion paths, which do not.
+
+        if (currentIndex in indices) player.prepare()
+        // If the removed song was not the current item no transition fires, so persist explicitly.
+        if (cachedPersistentQueue) saveQueueToDisk()
+    }
+
     fun addToTargetPlaylist() {
         scope.launch {
             val currentSong = currentSong.first() ?: return@launch
@@ -2539,10 +2620,15 @@ class MusicService :
             scope.launch(SilentHandler) {
                 val mediaItems =
                     withContext(Dispatchers.IO) {
+                        // Only radio continuations are filtered. A user playlist pages through
+                        // nextPage() too, and its tracks were chosen deliberately.
+                        val disliked =
+                            if (currentQueue.isRadio) database.dislikedSongIds().toSet() else emptySet()
                         currentQueue
                             .nextPage()
                             .filterExplicit(cachedHideExplicit)
                             .filterVideoSongs(cachedHideVideoSongs)
+                            .filterDisliked(disliked)
                     }
                 if (player.playbackState != STATE_IDLE && mediaItems.isNotEmpty()) {
                     player.addMediaItems(mediaItems)
