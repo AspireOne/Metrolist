@@ -17,6 +17,12 @@ class YouTubeQueue(
     private var endpoint: WatchEndpoint,
     override val preloadItem: MediaMetadata? = null,
 ) : Queue {
+    // Captured at construction on purpose: `endpoint` is reassigned while paging, and the RDAMVM
+    // prefix is gone by the time nextPage() runs, so computing this lazily would answer wrongly.
+    override val isRadio: Boolean =
+        endpoint.playlistId?.startsWith("RDAMVM") == true ||
+            (endpoint.videoId != null && endpoint.playlistId == null)
+
     private var continuation: String? = null
     private var retryCount = 0
     private val maxRetries = 3
@@ -34,10 +40,6 @@ class YouTubeQueue(
                 )
             }
 
-            val isRadioRequest =
-                endpoint.playlistId?.startsWith("RDAMVM") == true ||
-                (endpoint.videoId != null && endpoint.playlistId == null)
-
             for (attempt in 0..maxRetries) {
                 try {
                     val nextResult = YouTube.next(endpoint, continuation).getOrThrow()
@@ -45,7 +47,7 @@ class YouTubeQueue(
                     var items = nextResult.items
                     val relEndpoint = nextResult.relatedEndpoint
                     
-                    if (isRadioRequest && continuation == null && items.size <= 1) {
+                    if (isRadio && continuation == null && items.size <= 1) {
                         if (endpoint.playlistId?.startsWith("RDAMVM") == true) {
                             throw EmptyRadioQueueException()
                         } else if (relEndpoint != null) {

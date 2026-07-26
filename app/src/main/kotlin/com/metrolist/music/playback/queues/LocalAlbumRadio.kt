@@ -20,6 +20,9 @@ class LocalAlbumRadio(
 ) : Queue {
     override val preloadItem: MediaMetadata? = null
 
+    // The album itself comes from getInitialStatus(); only nextPage() is the generated mix.
+    override val isRadio: Boolean = true
+
     private lateinit var playlistId: String
     private val endpoint: WatchEndpoint
         get() = WatchEndpoint(

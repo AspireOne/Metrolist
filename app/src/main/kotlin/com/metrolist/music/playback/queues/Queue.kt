@@ -12,6 +12,16 @@ import com.metrolist.music.models.MediaMetadata
 interface Queue {
     val preloadItem: MediaMetadata?
 
+    /**
+     * True when this queue is algorithmically generated (a radio / automix) rather than something
+     * the user picked track by track. Only radio queues drop disliked songs.
+     *
+     * Album radios report true even though [getInitialStatus] returns the deliberately-chosen album:
+     * their mix only ever arrives through [nextPage], so filtering continuations alone leaves the
+     * album itself untouched.
+     */
+    val isRadio: Boolean get() = false
+
     suspend fun getInitialStatus(): Status
 
     fun hasNextPage(): Boolean
@@ -58,4 +68,14 @@ fun List<MediaItem>.filterVideoSongs(disableVideos: Boolean = false) =
         filterNot { it.metadata?.isVideoSong == true }
     } else {
         this
+    }
+
+/**
+ * Takes the ids rather than a DAO so this file stays free of a database dependency.
+ */
+fun List<MediaItem>.filterDisliked(dislikedIds: Set<String>) =
+    if (dislikedIds.isEmpty()) {
+        this
+    } else {
+        filterNot { it.mediaId in dislikedIds }
     }
