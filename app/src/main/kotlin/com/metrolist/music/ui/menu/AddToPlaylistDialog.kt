@@ -5,6 +5,7 @@
 
 package com.metrolist.music.ui.menu
 
+import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Row
@@ -12,6 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -25,6 +27,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
@@ -39,6 +42,7 @@ import com.metrolist.music.constants.InnerTubeCookieKey
 import com.metrolist.music.constants.ListThumbnailSize
 import com.metrolist.music.constants.PlaylistSortType
 import com.metrolist.music.db.entities.Playlist
+import com.metrolist.music.models.MediaMetadata
 import com.metrolist.music.ui.component.CreatePlaylistDialog
 import com.metrolist.music.ui.component.DefaultDialog
 import com.metrolist.music.ui.component.ListDialog
@@ -49,6 +53,8 @@ import com.metrolist.music.utils.rememberEnumPreference
 import com.metrolist.music.utils.rememberPreference
 import com.metrolist.music.viewmodels.PlaylistsViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.background
 import androidx.compose.runtime.LaunchedEffect
@@ -75,16 +81,51 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.material3.FilterChipDefaults
 import com.metrolist.music.LocalSyncUtils
 
+data class PlaylistAddPayload(
+    val songs: List<MediaMetadata>,
+    val remoteSourcePlaylistId: String? = null,
+)
+
+internal data class PreparedPlaylistAddition(
+    val songs: List<MediaMetadata>,
+    val useBulkRemoteAdd: Boolean,
+)
+
+internal fun preparePlaylistAddition(
+    payload: PlaylistAddPayload,
+    duplicateIdsToSkip: Set<String>,
+): PreparedPlaylistAddition =
+    PreparedPlaylistAddition(
+        songs = payload.songs.filterNot { it.id in duplicateIdsToSkip },
+        useBulkRemoteAdd =
+            duplicateIdsToSkip.isEmpty() && payload.remoteSourcePlaylistId != null,
+    )
+
+private sealed interface PlaylistAddState {
+    data object Idle : PlaylistAddState
+    data class Resolving(val target: Playlist) : PlaylistAddState
+    data class AwaitingDuplicateDecision(
+        val target: Playlist,
+        val payload: PlaylistAddPayload,
+        val duplicates: Set<String>,
+    ) : PlaylistAddState
+    data object Enqueued : PlaylistAddState
+}
+
 @Composable
 fun AddToPlaylistDialog(
     isVisible: Boolean,
     allowSyncing: Boolean = true,
     initialTextFieldValue: String? = null,
-    onGetSong: suspend (Playlist) -> List<String>, // list of song ids. Songs should be inserted to database in this function.
-    onGetSongIds: (suspend () -> List<String>)? = null,
+    onResolveSongs: suspend () -> Result<PlaylistAddPayload>,
+    // Cheap preview used only for highlighting. It may be incomplete and is never substituted by
+    // the authoritative resolver, whose work can be expensive and must remain side-effect free.
+    onPreviewSongIds: (suspend () -> List<String>)? = null,
     onDismiss: () -> Unit,
     viewModel: PlaylistsViewModel = hiltViewModel()
 ) {
+    val context = LocalContext.current
+    val loadAllErrorText = stringResource(R.string.error_load_all_songs)
     val database = LocalDatabase.current
     val syncUtils = LocalSyncUtils.current
     val coroutineScope = rememberCoroutineScope()
@@ -105,44 +146,56 @@ fun AddToPlaylistDialog(
         mutableStateOf(false)
     }
 
-    var showDuplicateDialog by remember {
-        mutableStateOf(false)
-    }
-    var selectedPlaylist by remember {
-        mutableStateOf<Playlist?>(null)
-    }
-    var songIds by remember {
-        mutableStateOf<List<String>?>(null)
-    }
-    var duplicates by remember {
-        mutableStateOf(emptyList<String>())
-    }
+    var addState by remember { mutableStateOf<PlaylistAddState>(PlaylistAddState.Idle) }
+    var resolveJob by remember { mutableStateOf<Job?>(null) }
+    var previewSongIds by remember { mutableStateOf<List<String>?>(null) }
     var playlistsContainingSong by remember {
         mutableStateOf<Set<String>>(emptySet())
     }
 
-    suspend fun addSongsAndSync(targetPlaylist: Playlist, ids: List<String>) {
-        database.addSongsToPlaylist(targetPlaylist, ids.map { it to null }, prepend = true)
-        targetPlaylist.playlist.browseId?.let { plist ->
-            ids.forEach { songId ->
-                syncUtils.addToPlaylist(plist, targetPlaylist.id, songId)
-            }
+    fun enqueue(
+        target: Playlist,
+        payload: PlaylistAddPayload,
+        skipDuplicates: Set<String> = emptySet(),
+    ) {
+        if (addState is PlaylistAddState.Enqueued) return
+        addState = PlaylistAddState.Enqueued
+        val prepared = preparePlaylistAddition(payload, skipDuplicates)
+        syncUtils.enqueuePlaylistAddition(
+            target = target,
+            songs = prepared.songs,
+            remoteSourcePlaylistId = payload.remoteSourcePlaylistId,
+            useBulkRemoteAdd = prepared.useBulkRemoteAdd,
+        )
+        onDismiss()
+    }
+
+    fun dismiss() {
+        if (addState is PlaylistAddState.Resolving) {
+            resolveJob?.cancel()
         }
+        resolveJob = null
+        addState = PlaylistAddState.Idle
+        onDismiss()
     }
 
     LaunchedEffect(isVisible, playlists.isEmpty()) {
         if (!isVisible || playlists.isEmpty()) return@LaunchedEffect
-        if (songIds != null) return@LaunchedEffect
+        if (previewSongIds != null || onPreviewSongIds == null) return@LaunchedEffect
         withContext(Dispatchers.IO) {
-            songIds = onGetSongIds?.invoke() ?: onGetSong(playlists.first())
+            previewSongIds = onPreviewSongIds()
         }
     }
-    LaunchedEffect(isVisible, songIds, playlists) {
+    LaunchedEffect(isVisible, previewSongIds, playlists) {
         if (!isVisible) {
             playlistsContainingSong = emptySet()
+            previewSongIds = null
+            resolveJob?.cancel()
+            resolveJob = null
+            addState = PlaylistAddState.Idle
             return@LaunchedEffect
         }
-        val ids = songIds ?: return@LaunchedEffect
+        val ids = previewSongIds ?: return@LaunchedEffect
         withContext(Dispatchers.IO) {
             playlistsContainingSong = playlists
                 .filter { database.playlistDuplicates(it.id, ids).isNotEmpty() }
@@ -153,7 +206,7 @@ fun AddToPlaylistDialog(
 
     if (isVisible) {
         ListDialog(
-            onDismiss = onDismiss,
+            onDismiss = ::dismiss,
         ) {
             item {
                 val interactionSource = remember { MutableInteractionSource() }
@@ -168,6 +221,7 @@ fun AddToPlaylistDialog(
                 )
                 FilledTonalButton(
                     onClick = { showCreatePlaylistDialog = true},
+                    enabled = addState is PlaylistAddState.Idle,
                     shape = RoundedCornerShape(50),
                     interactionSource = interactionSource,
                     colors = ButtonDefaults.filledTonalButtonColors(
@@ -213,6 +267,7 @@ fun AddToPlaylistDialog(
                                 FilterChip(
                                     selected = selected,
                                     onClick = { onSortTypeChange(type) },
+                                    enabled = addState is PlaylistAddState.Idle,
                                     shape = RoundedCornerShape(50),
                                     border = FilterChipDefaults.filterChipBorder(
                                         enabled = true,
@@ -256,6 +311,7 @@ fun AddToPlaylistDialog(
                         IconToggleButton(
                             checked = sortDescending,
                             onCheckedChange = { onSortDescendingChange(it) },
+                            enabled = addState is PlaylistAddState.Idle,
                             modifier = Modifier
                                 .clip(RoundedCornerShape(50))
                                 .background(arrowBg)
@@ -276,6 +332,18 @@ fun AddToPlaylistDialog(
                 }
             }
 
+            if (addState is PlaylistAddState.Resolving) {
+                item(key = "resolving_playlist_source") {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                    }
+                }
+            }
+
             items(playlists) { playlist ->
                 val containsSong = playlist.id in playlistsContainingSong
                 val rowBg by animateColorAsState(
@@ -291,23 +359,53 @@ fun AddToPlaylistDialog(
                     .padding(horizontal = 8.dp, vertical = 2.dp)
                     .clip(RoundedCornerShape(16.dp))
                     .background(rowBg)
-                    .clickable {
-                        selectedPlaylist = playlist
-                        coroutineScope.launch(Dispatchers.IO) {
-                            if (songIds == null) {
-                                songIds = onGetSong(playlist)
-                            } else {
-                                onGetSong(playlist)
+                    .clickable(enabled = addState is PlaylistAddState.Idle, onClick = click@{
+                        if (addState !is PlaylistAddState.Idle) return@click
+                        addState = PlaylistAddState.Resolving(playlist)
+                        resolveJob =
+                            coroutineScope.launch(Dispatchers.IO) {
+                                try {
+                                    val payload = onResolveSongs().getOrThrow()
+                                    if (payload.songs.isEmpty()) {
+                                        withContext(Dispatchers.Main) {
+                                            addState = PlaylistAddState.Enqueued
+                                            onDismiss()
+                                        }
+                                        return@launch
+                                    }
+                                    val duplicates =
+                                        database
+                                            .playlistDuplicates(
+                                                playlist.id,
+                                                payload.songs.map { it.id },
+                                            ).toSet()
+                                    withContext(Dispatchers.Main) {
+                                        if (duplicates.isEmpty()) {
+                                            enqueue(playlist, payload)
+                                        } else {
+                                            addState =
+                                                PlaylistAddState.AwaitingDuplicateDecision(
+                                                    target = playlist,
+                                                    payload = payload,
+                                                    duplicates = duplicates,
+                                                )
+                                        }
+                                    }
+                                } catch (e: CancellationException) {
+                                    throw e
+                                } catch (error: Exception) {
+                                    withContext(Dispatchers.Main) {
+                                        addState = PlaylistAddState.Idle
+                                        Toast
+                                            .makeText(
+                                                context,
+                                                error.message ?: loadAllErrorText,
+                                                Toast.LENGTH_SHORT,
+                                            ).show()
+                                    }
+                                }
                             }
-                            duplicates = database.playlistDuplicates(playlist.id, songIds!!)
-                            if (duplicates.isNotEmpty()) {
-                                showDuplicateDialog = true
-                            } else {
-                                onDismiss()
-                                addSongsAndSync(playlist, songIds!!)
-                            }
-                        }
-                    }
+                    })
                 )
             }
         }
@@ -322,20 +420,14 @@ fun AddToPlaylistDialog(
     }
 
     // duplicate songs warning
-        if (showDuplicateDialog) {
+        val pending = addState as? PlaylistAddState.AwaitingDuplicateDecision
+        if (pending != null) {
             DefaultDialog(
                 title = { Text(stringResource(R.string.duplicates)) },
                 buttons = {
                     TextButton(
                         onClick = {
-                            showDuplicateDialog = false
-                            onDismiss()
-                            coroutineScope.launch(Dispatchers.IO) {
-                                addSongsAndSync(
-                                    selectedPlaylist!!,
-                                    songIds!!.filter { !duplicates.contains(it) }
-                                )
-                            }
+                            enqueue(pending.target, pending.payload, pending.duplicates)
                         }
                     ) {
                         Text(stringResource(R.string.skip_duplicates))
@@ -343,11 +435,7 @@ fun AddToPlaylistDialog(
 
                     TextButton(
                         onClick = {
-                            showDuplicateDialog = false
-                            onDismiss()
-                            coroutineScope.launch(Dispatchers.IO) {
-                                addSongsAndSync(selectedPlaylist!!, songIds!!)
-                            }
+                            enqueue(pending.target, pending.payload)
                         }
                     ) {
                         Text(stringResource(R.string.add_anyway))
@@ -355,21 +443,21 @@ fun AddToPlaylistDialog(
 
                     TextButton(
                         onClick = {
-                            showDuplicateDialog = false
+                            addState = PlaylistAddState.Idle
                         }
                     ) {
                         Text(stringResource(android.R.string.cancel))
                     }
                 },
                 onDismiss = {
-                    showDuplicateDialog = false
+                    addState = PlaylistAddState.Idle
                 }
             ) {
                 Text(
-                    text = if (duplicates.size == 1) {
+                    text = if (pending.duplicates.size == 1) {
                         stringResource(R.string.duplicates_description_single)
                     } else {
-                        stringResource(R.string.duplicates_description_multiple, duplicates.size)
+                        stringResource(R.string.duplicates_description_multiple, pending.duplicates.size)
                     },
                     textAlign = TextAlign.Start,
                     modifier = Modifier.align(Alignment.Start)

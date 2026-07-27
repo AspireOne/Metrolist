@@ -31,6 +31,7 @@ import com.metrolist.music.db.entities.SongEntity
 import com.metrolist.music.extensions.collectLatest
 import com.metrolist.music.extensions.isInternetConnected
 import com.metrolist.music.extensions.isSyncEnabled
+import com.metrolist.music.models.MediaMetadata
 import com.metrolist.music.models.toMediaMetadata
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
@@ -42,8 +43,11 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
@@ -121,6 +125,81 @@ data class SyncState(
 internal fun mayRemoveMissing(isComplete: Boolean, remoteCount: Int): Boolean =
     isComplete && remoteCount > 0
 
+/** Per-song remote playlist edits from one batch that never landed, reported as a whole. */
+data class PlaylistEditFailure(
+    val playlistName: String,
+    val failedCount: Int,
+)
+
+/** One remote per-song edit that did not succeed, carrying the error from its last attempt. */
+internal data class FailedSongEdit(val songId: String, val error: Throwable)
+
+/**
+ * Applies [addOne] to every id in [songIds], isolating per-song failures.
+ *
+ * A remote edit that throws must not decide the fate of the ids behind it. The caller has already
+ * committed all of them locally, and playlist sync treats the remote list as authoritative, so an
+ * id that was never *attempted* is an id a later sync silently deletes. Every id is therefore
+ * attempted before this returns.
+ *
+ * Failures are re-attempted as one whole second pass rather than immediately, so a brief outage has
+ * time to clear without reordering the successful adds. [shouldRetry] is consulted only when the
+ * first pass left a residue; the caller uses it to skip a second pass that would merely double a
+ * hopeless batch.
+ *
+ * Cancellation is never recorded as a failure — it propagates, because a cancelled batch has no
+ * residue to report. This is why the loop cannot use a plain `runCatching`.
+ */
+internal suspend fun addSongsIndividually(
+    songIds: List<String>,
+    shouldRetry: () -> Boolean = { true },
+    addOne: suspend (String) -> Unit,
+): List<FailedSongEdit> {
+    suspend fun attemptAll(ids: List<String>): List<FailedSongEdit> {
+        val failures = mutableListOf<FailedSongEdit>()
+        for (id in ids) {
+            try {
+                addOne(id)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                failures += FailedSongEdit(id, e)
+            }
+        }
+        return failures
+    }
+
+    if (songIds.isEmpty()) return emptyList()
+
+    val firstPass = attemptAll(songIds)
+    if (firstPass.isEmpty() || !shouldRetry()) return firstPass
+    return attemptAll(firstPass.map { it.songId })
+}
+
+internal class OperationAdmission {
+    private val lock = Any()
+    private val activeIds = mutableSetOf<String>()
+    private val _active = MutableStateFlow<Set<String>>(emptySet())
+    val active: StateFlow<Set<String>> = _active.asStateFlow()
+
+    fun tryEnter(id: String): Boolean =
+        synchronized(lock) {
+            if (!activeIds.add(id)) {
+                false
+            } else {
+                _active.value = activeIds.toSet()
+                true
+            }
+        }
+
+    fun leave(id: String) {
+        synchronized(lock) {
+            activeIds.remove(id)
+            _active.value = activeIds.toSet()
+        }
+    }
+}
+
 @Singleton
 class SyncUtils @Inject constructor(
     @ApplicationContext private val context: Context,
@@ -142,6 +221,15 @@ class SyncUtils @Inject constructor(
 
     private val _syncState = MutableStateFlow(SyncState())
     val syncState: StateFlow<SyncState> = _syncState.asStateFlow()
+
+    private val bookmarkOperations = OperationAdmission()
+    val bookmarkingBrowseIds: StateFlow<Set<String>> = bookmarkOperations.active
+
+    // Batches run in an application-owned scope after their dialog is gone, so a failure has no
+    // caller left to return to. Buffered and conflation-free so a burst is not silently dropped;
+    // with no collector attached there is nobody to tell and the event is discarded.
+    private val _playlistEditFailures = MutableSharedFlow<PlaylistEditFailure>(extraBufferCapacity = 4)
+    val playlistEditFailures: SharedFlow<PlaylistEditFailure> = _playlistEditFailures.asSharedFlow()
 
     private var lastfmSendLikes = false
     @Volatile private var cachedLastSyncEpoch: Long = 0L
@@ -1818,22 +1906,194 @@ class SyncUtils @Inject constructor(
         }
     }
 
-    suspend fun addToPlaylist(
-        browseId: String,
-        playlistId: String,
-        songId: String,
-    ): Boolean {
-        markPlaylistModifying(playlistId)
+    /**
+     * Sets an online playlist's bookmarked state exactly once across every UI entry point.
+     *
+     * The complete source is resolved before a save mutates anything. Admission is process-wide,
+     * while [syncExecutionMutex] serializes the final re-query, local transaction, and remote call
+     * with full sync so it cannot observe a half-applied bookmark.
+     */
+    suspend fun setOnlinePlaylistBookmarked(
+        playlist: PlaylistItem,
+        bookmarked: Boolean,
+        resolveSongs: suspend () -> Result<List<MediaMetadata>>,
+    ): Result<Unit> {
+        if (!bookmarkOperations.tryEnter(playlist.id)) {
+            Timber.d("Ignoring duplicate bookmark request for ${playlist.id}")
+            return Result.success(Unit)
+        }
+
         return try {
-            runQueuedPlaylistEdit {
-                YouTube.addToPlaylist(browseId, songId).getOrThrow()
+            val songs =
+                if (bookmarked) {
+                    resolveSongs().getOrThrow().distinctBy { it.id }
+                } else {
+                    emptyList()
+                }
+
+            syncExecutionMutex.withLock {
+                val current = database.playlistByBrowseIdBlocking(playlist.id)
+                val currentlyBookmarked = current?.playlist?.bookmarkedAt != null
+                if (currentlyBookmarked == bookmarked) {
+                    return@withLock
+                }
+
+                database.withTransaction {
+                    if (bookmarked) {
+                        val entity =
+                            current
+                                ?.playlist
+                                ?.copy(
+                                    name = playlist.title,
+                                    browseId = playlist.id,
+                                    thumbnailUrl = playlist.thumbnail,
+                                    isEditable = playlist.isEditable,
+                                    bookmarkedAt = LocalDateTime.now(),
+                                    remoteSongCount = songs.size,
+                                    playEndpointParams = playlist.playEndpoint?.params,
+                                    shuffleEndpointParams = playlist.shuffleEndpoint?.params,
+                                    radioEndpointParams = playlist.radioEndpoint?.params,
+                                )
+                                ?: PlaylistEntity(
+                                    name = playlist.title,
+                                    browseId = playlist.id,
+                                    thumbnailUrl = playlist.thumbnail,
+                                    isEditable = playlist.isEditable,
+                                    bookmarkedAt = LocalDateTime.now(),
+                                    remoteSongCount = songs.size,
+                                    playEndpointParams = playlist.playEndpoint?.params,
+                                    shuffleEndpointParams = playlist.shuffleEndpoint?.params,
+                                    radioEndpointParams = playlist.radioEndpoint?.params,
+                                )
+                        if (current == null) insert(entity) else update(entity)
+                        songs.forEach(::insert)
+
+                        val existingIds = playlistSongIdsBlocking(entity.id).toSet()
+                        val missingSongs = songs.filterNot { it.id in existingIds }
+                        if (missingSongs.isNotEmpty()) {
+                            val savedPlaylist =
+                                playlistBlocking(entity.id)
+                                    ?: throw IllegalStateException("Failed to save playlist")
+                            addSongsToPlaylist(
+                                savedPlaylist,
+                                missingSongs.map { it.id to it.setVideoId },
+                            )
+                        }
+                    } else {
+                        val entity = current?.playlist ?: return@withTransaction
+                        update(entity.copy(bookmarkedAt = null))
+                    }
+                }
+
+                val remoteResult =
+                    if (playlist.isPodcast) {
+                        YouTube.savePodcast(playlist.id, bookmarked)
+                    } else {
+                        YouTube.likePlaylist(playlist.id, bookmarked)
+                    }
+                remoteResult.getOrThrow()
             }
-            true
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            Timber.e(e, "Failed to add song $songId to playlist $browseId")
-            false
+            Timber.e(e, "Failed to set bookmark=$bookmarked for playlist ${playlist.id}")
+            Result.failure(e)
         } finally {
-            unmarkPlaylistModifying(playlistId)
+            bookmarkOperations.leave(playlist.id)
+        }
+    }
+
+    /**
+     * Accepts an add-to-playlist operation into the application-owned scope.
+     *
+     * Resolution and duplicate choice happen before this boundary. Once accepted, the operation
+     * survives dismissal of the picker: local metadata and mappings commit once, followed by
+     * exactly one remote strategy (playlist-level bulk add or per-song edits).
+     */
+    fun enqueuePlaylistAddition(
+        target: com.metrolist.music.db.entities.Playlist,
+        songs: List<MediaMetadata>,
+        remoteSourcePlaylistId: String?,
+        useBulkRemoteAdd: Boolean,
+    ) {
+        if (songs.isEmpty()) return
+
+        markPlaylistModifying(target.id)
+        syncScope.launch {
+            try {
+                database.withTransaction {
+                    songs.forEach(::insert)
+                    val currentTarget =
+                        playlistBlocking(target.id)
+                            ?: throw IllegalStateException("Destination playlist no longer exists")
+                    addSongsToPlaylist(
+                        currentTarget,
+                        songs.map { it.id to it.setVideoId },
+                        prepend = true,
+                    )
+                }
+
+                val browseId = target.playlist.browseId ?: return@launch
+                if (useBulkRemoteAdd && remoteSourcePlaylistId != null) {
+                    // One request covers the whole batch, so there is nothing to isolate: it either
+                    // lands or every song is local-only. Caught here rather than by the outer
+                    // handler so a remote failure is reported without also claiming that a failed
+                    // local transaction reached YouTube.
+                    try {
+                        runQueuedPlaylistEdit {
+                            YouTube
+                                .addPlaylistToPlaylist(browseId, remoteSourcePlaylistId)
+                                .getOrThrow()
+                        }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Timber.e(
+                            e,
+                            "Failed to bulk-add ${songs.size} songs to playlist $browseId",
+                        )
+                        _playlistEditFailures.tryEmit(
+                            PlaylistEditFailure(
+                                playlistName = target.playlist.name,
+                                failedCount = songs.size,
+                            ),
+                        )
+                    }
+                } else {
+                    val failures =
+                        addSongsIndividually(
+                            songIds = songs.map { it.id },
+                            shouldRetry = { context.isInternetConnected() },
+                        ) { songId ->
+                            runQueuedPlaylistEdit {
+                                YouTube.addToPlaylist(browseId, songId).getOrThrow()
+                            }
+                        }
+
+                    if (failures.isNotEmpty()) {
+                        val listedIds = failures.take(20).joinToString { it.songId }
+                        val elided = if (failures.size > 20) ", …" else ""
+                        Timber.e(
+                            failures.first().error,
+                            "Failed to add ${failures.size} of ${songs.size} songs to playlist " +
+                                "$browseId: $listedIds$elided",
+                        )
+                        _playlistEditFailures.tryEmit(
+                            PlaylistEditFailure(
+                                playlistName = target.playlist.name,
+                                failedCount = failures.size,
+                            ),
+                        )
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Timber.e(e, "Failed to add ${songs.size} songs to playlist ${target.id}")
+            } finally {
+                unmarkPlaylistModifying(target.id)
+            }
         }
     }
 

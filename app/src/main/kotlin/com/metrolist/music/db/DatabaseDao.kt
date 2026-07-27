@@ -99,6 +99,15 @@ interface DatabaseDao {
     )
     suspend fun playlistSongIds(playlistId: String): List<String>
 
+    @Query(
+        """
+        SELECT songId FROM playlist_song_map
+        WHERE playlistId = :playlistId
+        ORDER BY position
+        """,
+    )
+    fun playlistSongIdsBlocking(playlistId: String): List<String>
+
     @Query("SELECT * FROM album WHERE id = :albumId LIMIT 1")
     suspend fun albumEntity(albumId: String): AlbumEntity?
 
@@ -1123,6 +1132,13 @@ interface DatabaseDao {
     @Transaction
     @Query("SELECT *, (SELECT COUNT(*) FROM playlist_song_map WHERE playlistId = playlist.id) AS songCount FROM playlist WHERE browseId = :browseId")
     fun playlistByBrowseId(browseId: String): Flow<Playlist?>
+
+    @Transaction
+    @Query(
+        "SELECT *, (SELECT COUNT(*) FROM playlist_song_map WHERE playlistId = playlist.id) " +
+            "AS songCount FROM playlist WHERE browseId = :browseId LIMIT 1",
+    )
+    fun playlistByBrowseIdBlocking(browseId: String): Playlist?
 
     @Transaction
     @Query("SELECT COUNT(*) from playlist_song_map WHERE playlistId = :playlistId AND songId = :songId LIMIT 1")

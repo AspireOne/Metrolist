@@ -5,6 +5,7 @@
 
 package com.metrolist.music.ui.screens.playlist
 
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
@@ -29,6 +30,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ContainedLoadingIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
@@ -44,6 +46,7 @@ import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -51,6 +54,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -78,6 +82,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
+import com.metrolist.innertube.YouTube
 import com.metrolist.innertube.models.PlaylistItem
 import com.metrolist.innertube.models.SongItem
 import com.metrolist.music.LocalDatabase
@@ -100,6 +105,7 @@ import com.metrolist.music.ui.component.YouTubeListItem
 import com.metrolist.music.ui.menu.YouTubePlaylistMenu
 import com.metrolist.music.ui.menu.YouTubeSelectionSongMenu
 import com.metrolist.music.ui.menu.YouTubeSongMenu
+import com.metrolist.music.ui.menu.resolveAllSongs
 import com.metrolist.music.ui.utils.backToMain
 import com.metrolist.music.ui.utils.resize
 import com.metrolist.music.utils.makeTimeString
@@ -108,6 +114,13 @@ import com.metrolist.music.viewmodels.OnlinePlaylistViewModel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+internal fun shouldRenderPlaylistContent(
+    hasPlaylist: Boolean,
+    visibleSongCount: Int,
+    allSongsLoaded: Boolean,
+): Boolean = hasPlaylist && (visibleSongCount > 0 || !allSongsLoaded)
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -130,11 +143,16 @@ fun OnlinePlaylistScreen(
     val songs by viewModel.playlistSongs.collectAsStateWithLifecycle()
     val dbPlaylist by viewModel.dbPlaylist.collectAsStateWithLifecycle()
     val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
-    val isLoadingMore by viewModel.isLoadingMore.collectAsStateWithLifecycle()
     val error by viewModel.error.collectAsStateWithLifecycle()
     val isPodcastPlaylist = viewModel.isPodcastPlaylist
     val likedSongsCount by viewModel.likedSongsCount.collectAsStateWithLifecycle()
     val likedSongsTotalDuration by viewModel.likedSongsTotalDuration.collectAsStateWithLifecycle()
+    val rawSongsLoadedCount by viewModel.rawSongsLoadedCount.collectAsStateWithLifecycle()
+    val rawSongsLoadedDuration by viewModel.rawSongsLoadedDuration.collectAsStateWithLifecycle()
+    val allSongsLoaded by viewModel.allSongsLoaded.collectAsStateWithLifecycle()
+    val loadAllError by viewModel.loadAllError.collectAsStateWithLifecycle()
+    val pagesLoaded by viewModel.pagesLoaded.collectAsStateWithLifecycle()
+    val loadAllSongs: suspend () -> Result<List<SongItem>> = remember(viewModel) { viewModel::awaitAllSongs }
 
     val hideExplicit by rememberPreference(key = HideExplicitKey, defaultValue = false)
 
@@ -169,7 +187,36 @@ fun OnlinePlaylistScreen(
     }
 
     val focusRequester = remember { FocusRequester() }
-    LaunchedEffect(isSearching) { if (isSearching) focusRequester.requestFocus() }
+    // The field stays disabled until the playlist is complete, and focus cannot be given to a
+    // disabled field, so this has to run again once loading finishes.
+    LaunchedEffect(isSearching, allSongsLoaded) {
+        if (isSearching && allSongsLoaded) focusRequester.requestFocus()
+    }
+
+    // Songs are paged in as the list is scrolled, so searching would otherwise only match the
+    // portion already on screen. Entering search pulls in the rest.
+    //
+    // Also keyed on isLoading: search can be opened before the first page has arrived, and at that
+    // point there is no continuation to follow yet, so this has to run again once there is.
+    LaunchedEffect(isSearching, isLoading) {
+        if (isSearching && !isLoading) viewModel.loadAllSongs()
+    }
+
+    val footerVisible by remember {
+        derivedStateOf {
+            lazyListState.layoutInfo.visibleItemsInfo.any { it.key == "loading_more" }
+        }
+    }
+
+    // Keyed on pagesLoaded so this re-evaluates after every fetched page, not only when the
+    // footer's visibility flips. A page can arrive without the visible list growing — every song
+    // in it a duplicate, or filtered out as a video — which would otherwise leave the footer on
+    // screen with nothing left to trigger the next page. Stops on error; the footer offers a retry.
+    LaunchedEffect(footerVisible, pagesLoaded, allSongsLoaded, loadAllError) {
+        if (footerVisible && !allSongsLoaded && loadAllError == null) {
+            viewModel.loadMoreSongs()
+        }
+    }
 
     LaunchedEffect(filteredSongs) {
         selection.fastForEachReversed { songId ->
@@ -197,7 +244,7 @@ fun OnlinePlaylistScreen(
             state = lazyListState,
             contentPadding = LocalPlayerAwareWindowInsets.current.union(WindowInsets.ime).asPaddingValues(),
         ) {
-            if (playlist == null || songs.isEmpty()) {
+            if (!shouldRenderPlaylistContent(playlist != null, songs.size, allSongsLoaded)) {
                 if (isLoading) {
                     item(key = "loading_placeholder") {
                         Box(
@@ -260,6 +307,10 @@ fun OnlinePlaylistScreen(
                                 isPodcastPlaylist = isPodcastPlaylist,
                                 totalSongCount = likedSongsCount,
                                 totalDurationSeconds = likedSongsTotalDuration,
+                                rawSongsLoadedCount = rawSongsLoadedCount,
+                                rawSongsLoadedDuration = rawSongsLoadedDuration,
+                                allSongsLoaded = allSongsLoaded,
+                                onLoadAllSongs = loadAllSongs,
                                 modifier = Modifier.animateItem(),
                             )
                         }
@@ -346,7 +397,9 @@ fun OnlinePlaylistScreen(
                         )
                     }
 
-                    if (isLoadingMore) {
+                    // Kept in the list whenever more pages exist: scrolling it into view is what
+                    // triggers the next fetch.
+                    if (!allSongsLoaded) {
                         item(key = "loading_more") {
                             Box(
                                 modifier =
@@ -355,7 +408,15 @@ fun OnlinePlaylistScreen(
                                         .padding(16.dp),
                                 contentAlignment = Alignment.Center,
                             ) {
-                                ContainedLoadingIndicator()
+                                if (loadAllError != null) {
+                                    androidx.compose.material3.TextButton(
+                                        onClick = { viewModel.loadMoreSongs() },
+                                    ) {
+                                        Text(stringResource(R.string.retry))
+                                    }
+                                } else {
+                                    ContainedLoadingIndicator()
+                                }
                             }
                         }
                     }
@@ -379,10 +440,23 @@ fun OnlinePlaylistScreen(
                     TextField(
                         value = query,
                         onValueChange = { query = it },
+                        enabled = allSongsLoaded,
                         placeholder = {
                             Text(
-                                text = stringResource(R.string.search),
+                                text =
+                                    when {
+                                        loadAllError != null -> stringResource(R.string.error_load_all_songs)
+                                        !allSongsLoaded ->
+                                            pluralStringResource(
+                                                if (isPodcastPlaylist) R.plurals.n_episode else R.plurals.n_song,
+                                                songs.size,
+                                                songs.size,
+                                            )
+                                        else -> stringResource(R.string.search)
+                                    },
                                 style = MaterialTheme.typography.titleLarge,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                             )
                         },
                         singleLine = true,
@@ -465,6 +539,23 @@ fun OnlinePlaylistScreen(
                             contentDescription = null,
                         )
                     }
+                } else if (isSearching && !allSongsLoaded) {
+                    // Searching matches against the loaded songs, so show how far the fetch has
+                    // got, and let it be retried if it stops short.
+                    if (loadAllError != null) {
+                        IconButton(onClick = { viewModel.loadAllSongs() }) {
+                            Icon(
+                                painter = painterResource(R.drawable.refresh),
+                                contentDescription = stringResource(R.string.retry),
+                            )
+                        }
+                    } else {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(24.dp),
+                            strokeWidth = 2.dp,
+                        )
+                        Spacer(modifier = Modifier.size(12.dp))
+                    }
                 } else if (!isSearching) {
                     IconButton(
                         onClick = { isSearching = true },
@@ -492,10 +583,14 @@ private fun OnlinePlaylistHeader(
     dbPlaylist: Playlist?,
     coroutineScope: CoroutineScope,
     continuation: String?,
+    modifier: Modifier = Modifier,
     isPodcastPlaylist: Boolean = false,
     totalSongCount: Int? = null,
     totalDurationSeconds: Int? = null,
-    modifier: Modifier = Modifier,
+    rawSongsLoadedCount: Int = songs.size,
+    rawSongsLoadedDuration: Int = songs.sumOf { it.duration ?: 0 },
+    allSongsLoaded: Boolean = true,
+    onLoadAllSongs: (suspend () -> Result<List<SongItem>>)? = null,
 ) {
     val navController = LocalNavController.current
     val playerConnection = LocalPlayerConnection.current ?: return
@@ -504,6 +599,10 @@ private fun OnlinePlaylistHeader(
     val database = LocalDatabase.current
     val menuState = LocalMenuState.current
     val syncUtils = LocalSyncUtils.current
+    val context = LocalContext.current
+    val loadAllErrorText = stringResource(R.string.error_load_all_songs)
+    val bookmarkingBrowseIds by syncUtils.bookmarkingBrowseIds.collectAsStateWithLifecycle()
+    val isBookmarking = playlist.id in bookmarkingBrowseIds
 
     Column(
         modifier =
@@ -586,23 +685,56 @@ private fun OnlinePlaylistHeader(
         // Prefer locally known totals when we have them (Liked Music): counting the songs loaded
         // so far would otherwise creep upwards by 100 with every remote page. Those totals are
         // approximate, hence the tilde.
-        val isApproximate = totalSongCount != null
-        val songCount = totalSongCount ?: songs.size
-        val totalDuration = totalDurationSeconds ?: songs.sumOf { it.duration ?: 0 }
-        val nSongs = pluralStringResource(
-            if (isPodcastPlaylist) R.plurals.n_episode else R.plurals.n_song,
-            songCount,
-            songCount,
-        )
-        val durationText = if (totalDuration > 0) makeTimeString(totalDuration * 1000L) else null
-        val metadataText = buildString {
-            if (isApproximate) append("~")
-            append(nSongs)
-            if (durationText != null) {
-                append(" ")
-                append(durationText)
+        val metadataText =
+            if (totalSongCount != null) {
+                val nSongs =
+                    pluralStringResource(
+                        if (isPodcastPlaylist) R.plurals.n_episode else R.plurals.n_song,
+                        totalSongCount,
+                        totalSongCount,
+                    )
+                val durationText =
+                    totalDurationSeconds
+                        ?.takeIf { it > 0 }
+                        ?.let { makeTimeString(it * 1000L) }
+                buildString {
+                    append("~")
+                    append(nSongs)
+                    if (durationText != null) {
+                        append(" ")
+                        append(durationText)
+                    }
+                }
+            } else if (!allSongsLoaded) {
+                val loaded =
+                    pluralStringResource(
+                        if (isPodcastPlaylist) R.plurals.n_episode_loaded else R.plurals.n_song_loaded,
+                        rawSongsLoadedCount,
+                        rawSongsLoadedCount,
+                    )
+                playlist.songCountText
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { stringResource(R.string.loaded_of_total, loaded, it) }
+                    ?: loaded
+            } else {
+                val nSongs =
+                    pluralStringResource(
+                        if (isPodcastPlaylist) R.plurals.n_episode else R.plurals.n_song,
+                        rawSongsLoadedCount,
+                        rawSongsLoadedCount,
+                    )
+                val durationText =
+                    rawSongsLoadedDuration
+                        .takeIf { it > 0 }
+                        ?.let { makeTimeString(it * 1000L) }
+                buildString {
+                    append(nSongs)
+                    if (durationText != null) {
+                        append(" ")
+                        append(durationText)
+                    }
+                }
             }
-        }
         Text(
             text = metadataText,
             style = MaterialTheme.typography.bodySmall,
@@ -635,40 +767,32 @@ private fun OnlinePlaylistHeader(
         ) {
             // Like Button - Smaller secondary button
             Surface(
+                enabled = !isBookmarking,
                 onClick = {
-                    if (dbPlaylist != null) {
-                        database.transaction {
-                            val currentPlaylist = dbPlaylist.playlist
-                            update(currentPlaylist, playlist)
-                            update(currentPlaylist.toggleLike())
-                        }
-                    } else {
-                        coroutineScope.launch(Dispatchers.IO) {
-                            val playlistEntity =
-                                PlaylistEntity(
-                                    name = playlist.title,
-                                    browseId = playlist.id,
-                                    thumbnailUrl = playlist.thumbnail,
-                                    isEditable = playlist.isEditable,
-                                    remoteSongCount =
-                                        playlist.songCountText?.let {
-                                            Regex("""\d+""").find(it)?.value?.toIntOrNull()
-                                        },
-                                    playEndpointParams = playlist.playEndpoint?.params,
-                                    shuffleEndpointParams = playlist.shuffleEndpoint?.params,
-                                    radioEndpointParams = playlist.radioEndpoint?.params,
-                                ).toggleLike()
-                            val songMetadata = songs.map { it.toMediaMetadata() }
-                            database.withTransaction {
-                                insert(playlistEntity)
-                                songMetadata.onEach { insert(it) }
-                                val songIds = songMetadata.map { it.id to it.setVideoId }
-                                val createdPlaylist =
-                                    database.playlistBlocking(playlistEntity.id)
-                                        ?: throw IllegalStateException("Failed to create playlist")
-                                database.addSongsToPlaylist(createdPlaylist, songIds)
+                    val desired = dbPlaylist?.playlist?.bookmarkedAt == null
+                    coroutineScope.launch(Dispatchers.IO) {
+                        syncUtils
+                            .setOnlinePlaylistBookmarked(
+                                playlist = playlist,
+                                bookmarked = desired,
+                                resolveSongs = {
+                                    resolveAllSongs(
+                                        playlist.id,
+                                        songs,
+                                        allSongsLoaded,
+                                        onLoadAllSongs,
+                                    ).map { resolved -> resolved.map { it.toMediaMetadata() } }
+                                },
+                            ).onFailure { error ->
+                                withContext(Dispatchers.Main) {
+                                    Toast
+                                        .makeText(
+                                            context,
+                                            error.message ?: loadAllErrorText,
+                                            Toast.LENGTH_SHORT,
+                                        ).show()
+                                }
                             }
-                        }
                     }
                 },
                 shape = CircleShape,
@@ -734,6 +858,8 @@ private fun OnlinePlaylistHeader(
                         YouTubePlaylistMenu(
                             playlist = playlist,
                             songs = songs,
+                            songsComplete = allSongsLoaded,
+                            onLoadAllSongs = onLoadAllSongs,
                             coroutineScope = coroutineScope,
                             onDismiss = menuState::dismiss,
                         )

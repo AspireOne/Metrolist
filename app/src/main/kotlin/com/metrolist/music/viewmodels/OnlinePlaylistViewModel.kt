@@ -21,15 +21,17 @@ import com.metrolist.music.utils.reportException
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import java.io.IOException
 import com.metrolist.music.constants.SongSortType
 import com.metrolist.innertube.models.Artist
 import com.metrolist.innertube.models.Album
@@ -76,6 +78,13 @@ class OnlinePlaylistViewModel @Inject constructor(
 
     val playlist = MutableStateFlow<PlaylistItem?>(null)
     val playlistSongs = MutableStateFlow<List<SongItem>>(emptyList())
+    private val rawPlaylistSongs = MutableStateFlow<List<SongItem>>(emptyList())
+
+    private val _rawSongsLoadedCount = MutableStateFlow(0)
+    val rawSongsLoadedCount = _rawSongsLoadedCount.asStateFlow()
+
+    private val _rawSongsLoadedDuration = MutableStateFlow(0)
+    val rawSongsLoadedDuration = _rawSongsLoadedDuration.asStateFlow()
 
     private val _isLoading = MutableStateFlow(true)
     val isLoading = _isLoading.asStateFlow()
@@ -86,13 +95,42 @@ class OnlinePlaylistViewModel @Inject constructor(
     private val _isLoadingMore = MutableStateFlow(false)
     val isLoadingMore = _isLoadingMore.asStateFlow()
 
+    /**
+     * Whether every page of the playlist has been fetched.
+     *
+     * Anything that acts on the playlist as a whole — bookmarking, exporting, downloading,
+     * searching — has to wait for this, or it silently operates on however much happens to have
+     * been scrolled into view.
+     */
+    private val _allSongsLoaded = MutableStateFlow(false)
+    val allSongsLoaded = _allSongsLoaded.asStateFlow()
+
+    private val _isLoadingAll = MutableStateFlow(false)
+    val isLoadingAll = _isLoadingAll.asStateFlow()
+
+    private val _loadAllError = MutableStateFlow<String?>(null)
+    val loadAllError = _loadAllError.asStateFlow()
+
+    /**
+     * Incremented after every page that is successfully fetched.
+     *
+     * The list is deduplicated and filtered, so a page can arrive without the visible list growing.
+     * This gives the screen something that always changes, so scroll-driven paging can re-evaluate
+     * after each page instead of stalling when a page adds nothing visible.
+     */
+    private val _pagesLoaded = MutableStateFlow(0)
+    val pagesLoaded = _pagesLoaded.asStateFlow()
+
     val dbPlaylist = database.playlistByBrowseId(playlistId)
         .stateIn(viewModelScope, SharingStarted.Lazily, null)
 
     var continuation: String? = null
         private set
 
-    private var proactiveLoadJob: Job? = null
+    private val loadMutex = Mutex()
+
+    /** Guards against a continuation cycle. Only touched under [loadMutex]. */
+    private val seenContinuations = mutableSetOf<String>()
 
     init {
         fetchInitialPlaylistData()
@@ -102,12 +140,26 @@ class OnlinePlaylistViewModel @Inject constructor(
         viewModelScope.launch(Dispatchers.IO) {
             _isLoading.value = true
             _error.value = null
-            continuation = null
-            proactiveLoadJob?.cancel() // Cancel any ongoing proactive load
+            _loadAllError.value = null
+            _allSongsLoaded.value = false
+            _pagesLoaded.value = 0
+            // Under the lock so an in-flight page cannot write its continuation back after the
+            // reset and resurrect the previous load.
+            loadMutex.withLock {
+                continuation = null
+                seenContinuations.clear()
+                playlist.value = null
+                rawPlaylistSongs.value = emptyList()
+                playlistSongs.value = emptyList()
+                _rawSongsLoadedCount.value = 0
+                _rawSongsLoadedDuration.value = 0
+            }
 
             if (isPodcastPlaylist) {
                 // Use special podcast playlist APIs
                 fetchPodcastPlaylist()
+                // Podcast playlists arrive in a single response, so there is never more to load.
+                _allSongsLoaded.value = true
             } else {
                 // Use regular playlist API
                 fetchRegularPlaylist()
@@ -130,7 +182,7 @@ class OnlinePlaylistViewModel @Inject constructor(
                             shuffleEndpoint = null,
                             radioEndpoint = null,
                         )
-                        playlistSongs.value = applySongFilters(episodes)
+                        replaceRawSongs(episodes)
                         _isLoading.value = false
                     }.onFailure { throwable ->
                         _error.value = throwable.message ?: "Failed to load new episodes"
@@ -156,7 +208,7 @@ class OnlinePlaylistViewModel @Inject constructor(
                         shuffleEndpoint = null,
                         radioEndpoint = null,
                     )
-                    playlistSongs.value = applySongFilters(episodes)
+                    replaceRawSongs(episodes)
                     _isLoading.value = false
                 } else {
                     // Fall back to local saved episodes when API fails or returns empty
@@ -175,12 +227,11 @@ class OnlinePlaylistViewModel @Inject constructor(
         YouTube.playlist(playlistId)
             .onSuccess { playlistPage ->
                 playlist.value = playlistPage.playlist
-                playlistSongs.value = applySongFilters(playlistPage.songs)
+                replaceRawSongs(playlistPage.songs)
                 continuation = playlistPage.songsContinuation
+                _allSongsLoaded.value = continuation == null
+                _pagesLoaded.value = 1
                 _isLoading.value = false
-                if (continuation != null) {
-                    startProactiveBackgroundLoading()
-                }
             }.onFailure { throwable ->
                 _error.value = throwable.message ?: "Failed to load playlist"
                 _isLoading.value = false
@@ -220,9 +271,8 @@ class OnlinePlaylistViewModel @Inject constructor(
                 shuffleEndpoint = null,
                 radioEndpoint = null,
             )
-            val filtered = applySongFilters(songItems)
-            timber.log.Timber.d("[SE_LOCAL] After filter: ${filtered.size} episodes, setting playlistSongs")
-            playlistSongs.value = filtered
+            replaceRawSongs(songItems)
+            timber.log.Timber.d("[SE_LOCAL] After filter: ${playlistSongs.value.size} episodes, setting playlistSongs")
             _isLoading.value = false
             timber.log.Timber.d("[SE_LOCAL] Done, isLoading=false")
         } else {
@@ -232,76 +282,133 @@ class OnlinePlaylistViewModel @Inject constructor(
         }
     }
 
-    private fun startProactiveBackgroundLoading() {
-        proactiveLoadJob?.cancel() // Cancel previous job if any
-        proactiveLoadJob = viewModelScope.launch(Dispatchers.IO) {
-            var currentProactiveToken = continuation
-            while (currentProactiveToken != null && isActive) {
-                // If a manual loadMore is happening, pause proactive loading
-                if (_isLoadingMore.value) {
-                    // Wait until manual load is finished, then re-evaluate
-                    // This simple break and restart strategy from loadMoreSongs is preferred
-                    break 
-                }
+    private enum class PageOutcome {
+        /** A page arrived and more remain. */
+        FETCHED,
 
-                YouTube.playlistContinuation(currentProactiveToken)
-                    .onSuccess { playlistContinuationPage ->
-                        val currentSongs = playlistSongs.value.toMutableList()
-                        currentSongs.addAll(playlistContinuationPage.songs)
-                        playlistSongs.value = applySongFilters(currentSongs)
-                        currentProactiveToken = playlistContinuationPage.continuation
-                        // Update the class-level continuation for manual loadMore if needed
-                        this@OnlinePlaylistViewModel.continuation = currentProactiveToken 
-                    }.onFailure { throwable ->
-                        reportException(throwable)
-                        currentProactiveToken = null // Stop proactive loading on error
-                    }
+        /** Every page has now been fetched. */
+        COMPLETE,
+
+        /** Nothing was fetched; [loadAllError] says why. The playlist is still incomplete. */
+        FAILED,
+    }
+
+    /**
+     * Fetches one more page.
+     *
+     * Never reports completion it cannot vouch for: a failed request and a looping continuation
+     * both leave the playlist incomplete, because in neither case can we tell how much is missing.
+     */
+    private suspend fun fetchNextPage(): PageOutcome {
+        val token = continuation ?: return PageOutcome.COMPLETE
+        if (token in seenContinuations) {
+            // YouTube handed back a token it already gave us. Following it would loop forever, and
+            // there is no way to know what is missing, so this is a failure and not an end.
+            _loadAllError.value = "Playlist paging looped"
+            return PageOutcome.FAILED
+        }
+        var outcome = PageOutcome.FAILED
+        YouTube.playlistContinuation(token)
+            .onSuccess { page ->
+                // Recorded only once it succeeds, so that a page which failed for a transient
+                // reason can be retried rather than being mistaken for a loop.
+                seenContinuations.add(token)
+                val currentSongs = rawPlaylistSongs.value.toMutableList()
+                currentSongs.addAll(page.songs)
+                replaceRawSongs(currentSongs)
+                continuation = page.continuation
+                _allSongsLoaded.value = continuation == null
+                _pagesLoaded.value++
+                outcome = if (continuation == null) PageOutcome.COMPLETE else PageOutcome.FETCHED
+            }.onFailure { throwable ->
+                reportException(throwable)
+                _loadAllError.value = throwable.message ?: "Failed to load more songs"
             }
-            // If loop finishes because currentProactiveToken is null, all songs are loaded proactively.
+        return outcome
+    }
+
+    /** Fetches the next page as the user scrolls towards the end of the list. */
+    fun loadMoreSongs() {
+        if (_isLoadingMore.value || _isLoadingAll.value || continuation == null) return
+
+        viewModelScope.launch(Dispatchers.IO) {
+            _isLoadingMore.value = true
+            try {
+                loadMutex.withLock {
+                    _loadAllError.value = null
+                    fetchNextPage()
+                }
+            } finally {
+                _isLoadingMore.value = false
+            }
         }
     }
 
-    fun loadMoreSongs() {
-        if (_isLoadingMore.value) return // Already loading more (manually)
-        
-        val tokenForManualLoad = continuation ?: return // No more songs to load
-
-        proactiveLoadJob?.cancel() // Cancel proactive loading to prioritize manual scroll
-        _isLoadingMore.value = true
-
-        viewModelScope.launch(Dispatchers.IO) {
-            YouTube.playlistContinuation(tokenForManualLoad)
-                .onSuccess { playlistContinuationPage ->
-                    val currentSongs = playlistSongs.value.toMutableList()
-                    currentSongs.addAll(playlistContinuationPage.songs)
-                    playlistSongs.value = applySongFilters(currentSongs)
-                    continuation = playlistContinuationPage.continuation
-                }.onFailure { throwable ->
-                    reportException(throwable)
-                }.also {
-                    _isLoadingMore.value = false
-                    // Resume proactive loading if there's still a continuation
-                    if (continuation != null && isActive) {
-                        startProactiveBackgroundLoading()
-                    }
+    /**
+     * Fetches every remaining page and returns the playlist in full.
+     *
+     * Fails rather than returning what it managed to get: callers use this for actions that cover
+     * the whole playlist — bookmarking, exporting, downloading, queueing — where quietly acting on
+     * a prefix is worse than not acting at all.
+     *
+     * The list returned is the same one the screen displays, so it is deduplicated and honours the
+     * hide-video-songs preference.
+     */
+    suspend fun awaitAllSongs(): Result<List<SongItem>> =
+        withContext(Dispatchers.IO) {
+            // Serialised against scroll-driven paging so the two can never fetch the same
+            // continuation, and so the loading flags below are only ever touched by one caller.
+            loadMutex.withLock {
+                if (continuation == null) {
+                    return@withLock Result.success(playlistSongs.value)
                 }
+                _isLoadingAll.value = true
+                _loadAllError.value = null
+                try {
+                    var result: Result<List<SongItem>>? = null
+                    while (result == null) {
+                        result = when (fetchNextPage()) {
+                            PageOutcome.FETCHED -> null // Keep going.
+                            PageOutcome.COMPLETE -> Result.success(playlistSongs.value)
+                            PageOutcome.FAILED ->
+                                Result.failure(
+                                    IOException(_loadAllError.value ?: "Failed to load all songs"),
+                                )
+                        }
+                    }
+                    result
+                } finally {
+                    _isLoadingAll.value = false
+                }
+            }
         }
+
+    /**
+     * Starts fetching every remaining page without waiting for the result.
+     *
+     * A large playlist costs one request per 100 songs, so this only runs when something actually
+     * needs the complete list, rather than on every visit to the screen. Progress and failure are
+     * published through [isLoadingAll], [allSongsLoaded] and [loadAllError].
+     */
+    fun loadAllSongs() {
+        if (_isLoadingAll.value || _allSongsLoaded.value) return
+        viewModelScope.launch { awaitAllSongs() }
     }
 
     fun retry() {
-        proactiveLoadJob?.cancel()
-        fetchInitialPlaylistData() // This will also restart proactive loading if applicable
+        fetchInitialPlaylistData()
     }
 
     private fun applySongFilters(songs: List<SongItem>): List<SongItem> {
         val hideVideoSongs = context.dataStore.get(HideVideoSongsKey, false)
-        return songs
-            .distinctBy { it.id }
-            .filterVideoSongs(hideVideoSongs)
+        return songs.filterVideoSongs(hideVideoSongs)
     }
 
-    override fun onCleared() {
-        super.onCleared()
-        proactiveLoadJob?.cancel()
+    private fun replaceRawSongs(songs: List<SongItem>) {
+        val deduplicated = songs.distinctBy { it.id }
+        rawPlaylistSongs.value = deduplicated
+        playlistSongs.value = applySongFilters(deduplicated)
+        _rawSongsLoadedCount.value = deduplicated.size
+        _rawSongsLoadedDuration.value = deduplicated.sumOf { it.duration ?: 0 }
     }
 }

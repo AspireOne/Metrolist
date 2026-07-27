@@ -138,17 +138,10 @@ fun SelectionSongMenu(
 
     AddToPlaylistDialog(
         isVisible = showChoosePlaylistDialog,
-        onGetSong = { playlist ->
-            coroutineScope.launch(Dispatchers.IO) {
-                songSelection.forEach { song ->
-                    playlist.playlist.browseId?.let { browseId ->
-                        YouTube.addToPlaylist(browseId, song.id)
-                    }
-                }
-            }
-            songSelection.map { it.id }
+        onResolveSongs = {
+            Result.success(PlaylistAddPayload(songs = songSelection.map { it.toMediaMetadata() }))
         },
-        onGetSongIds = { songSelection.map { it.id } },
+        onPreviewSongIds = { songSelection.map { it.id } },
         onDismiss = {
             showChoosePlaylistDialog = false
         },
@@ -690,14 +683,10 @@ fun SelectionMediaMetadataMenu(
 
     AddToPlaylistDialog(
         isVisible = showChoosePlaylistDialog,
-        onGetSong = {
-            // Safe: AddToPlaylistDialog wraps this lambda in withContext(Dispatchers.IO)
-            songSelection.map { song ->
-                database.insert(song)
-                song.id
-            }
+        onResolveSongs = {
+            Result.success(PlaylistAddPayload(songs = songSelection))
         },
-        onGetSongIds = { songSelection.map { it.id } },
+        onPreviewSongIds = { songSelection.map { it.id } },
         onDismiss = { showChoosePlaylistDialog = false },
     )
 

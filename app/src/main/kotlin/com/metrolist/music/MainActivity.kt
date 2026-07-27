@@ -933,6 +933,22 @@ class MainActivity : ComponentActivity() {
                 }
                 val snackbarHostState = remember { SnackbarHostState() }
 
+                // Add-to-playlist batches outlive the dialog that started them, so a remote failure
+                // has no caller left to report to. Without this the songs stay local-only and
+                // silently disappear the next time the playlist syncs.
+                LaunchedEffect(syncUtils) {
+                    syncUtils.playlistEditFailures.collect { failure ->
+                        snackbarHostState.showSnackbar(
+                            resources.getQuantityString(
+                                R.plurals.error_add_to_remote_playlist,
+                                failure.failedCount,
+                                failure.failedCount,
+                                failure.playlistName,
+                            ),
+                        )
+                    }
+                }
+
                 LaunchedEffect(Unit) {
                     if (pendingIntent != null) {
                         handleWidgetTargetIntent(pendingIntent!!, navController)

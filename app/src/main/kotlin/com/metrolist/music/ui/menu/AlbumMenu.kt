@@ -78,6 +78,7 @@ import com.metrolist.music.db.entities.Album
 import com.metrolist.music.db.entities.Song
 import com.metrolist.music.db.entities.SpeedDialItem
 import com.metrolist.music.extensions.toMediaItem
+import com.metrolist.music.models.toMediaMetadata
 import com.metrolist.music.playback.ExoDownloadService
 import com.metrolist.music.playback.queues.ListQueue
 import com.metrolist.music.ui.component.AlbumListItem
@@ -174,17 +175,15 @@ fun AlbumMenu(
 
     AddToPlaylistDialog(
         isVisible = showChoosePlaylistDialog,
-        onGetSong = { playlist ->
-            coroutineScope.launch(Dispatchers.IO) {
-                playlist.playlist.browseId?.let { playlistId ->
-                    album.album.playlistId?.let { addPlaylistId ->
-                        YouTube.addPlaylistToPlaylist(playlistId, addPlaylistId)
-                    }
-                }
-            }
-            songs.map { it.id }
+        onResolveSongs = {
+            Result.success(
+                PlaylistAddPayload(
+                    songs = songs.map { it.toMediaMetadata() },
+                    remoteSourcePlaylistId = album.album.playlistId,
+                ),
+            )
         },
-        onGetSongIds = { songs.map { it.id } },
+        onPreviewSongIds = { songs.map { it.id } },
         onDismiss = {
             showChoosePlaylistDialog = false
         },

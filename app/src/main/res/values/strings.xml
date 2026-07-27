@@ -171,6 +171,15 @@
         <item quantity="one">%d song</item>
         <item quantity="other">%d songs</item>
     </plurals>
+    <plurals name="n_song_loaded">
+        <item quantity="one">%d song loaded</item>
+        <item quantity="other">%d songs loaded</item>
+    </plurals>
+    <plurals name="n_episode_loaded">
+        <item quantity="one">%d episode loaded</item>
+        <item quantity="other">%d episodes loaded</item>
+    </plurals>
+    <string name="loaded_of_total">%1$s • %2$s</string>
     <plurals name="n_artist">
         <item quantity="one">%d artist</item>
         <item quantity="other">%d artists</item>
@@ -214,6 +223,11 @@
     <string name="error_no_internet">No network connection</string>
     <string name="error_timeout">Timeout</string>
     <string name="error_unknown">Unknown error</string>
+    <string name="error_load_all_songs">Couldn\'t load all songs</string>
+    <plurals name="error_add_to_remote_playlist">
+        <item quantity="one">Couldn\'t add %1$d song to %2$s on YouTube</item>
+        <item quantity="other">Couldn\'t add %1$d songs to %2$s on YouTube</item>
+    </plurals>
 
     <!-- Player action -->
     <string name="action_like">Like</string>
