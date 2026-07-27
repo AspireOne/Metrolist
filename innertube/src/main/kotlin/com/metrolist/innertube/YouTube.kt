@@ -2422,9 +2422,17 @@ object YouTube {
                     }
                 }
 
+            // Reported rather than discarded so callers can tell a first page from a whole list.
+            // Nothing here follows it; a caller that must not act on a prefix checks it instead.
+            val continuation =
+                contentList.firstNotNullOfOrNull { content ->
+                    content.gridRenderer?.continuations?.getContinuation()
+                        ?: content.musicShelfRenderer?.continuations?.getContinuation()
+                }
+
             LibraryPage(
                 items = items,
-                continuation = null,
+                continuation = continuation,
             )
         }.also { result ->
             result.onFailure { e -> Timber.e(e, "[PODCAST_API] libraryPodcastChannels FAILED") }
@@ -2474,9 +2482,14 @@ object YouTube {
                     }
                 }
 
+            // See libraryPodcastChannels: surfaced so a caller can tell a prefix from the lot.
+            val continuation =
+                contents?.gridRenderer?.continuations?.getContinuation()
+                    ?: contents?.musicShelfRenderer?.continuations?.getContinuation()
+
             LibraryPage(
                 items = items,
-                continuation = null,
+                continuation = continuation,
             )
         }.also { result ->
             result.onFailure { e -> Timber.e(e, "[PODCAST_API] libraryPodcastEpisodes FAILED") }
@@ -2827,7 +2840,16 @@ object YouTube {
      * Fetch "Episodes for Later" playlist (VLSE).
      * Returns manually saved episodes.
      */
-    suspend fun episodesForLater(): Result<List<SongItem>> =
+    suspend fun episodesForLater(): Result<List<SongItem>> = episodesForLaterPage().map { it.first }
+
+    /**
+     * "Episodes for later" (VLSE), together with the shelf's leftover continuation token.
+     *
+     * Nothing follows that token; it is surfaced so that a caller which removes local episodes
+     * missing from this list can first tell whether the list is all of them. [episodesForLater]
+     * drops it, which is fine for display and not for deletion.
+     */
+    suspend fun episodesForLaterPage(): Result<Pair<List<SongItem>, String?>> =
         runCatching {
             Timber.d("[PODCAST_API] episodesForLater: calling browse with VLSE")
             val response =
@@ -2851,8 +2873,12 @@ object YouTube {
                 contents?.musicPlaylistShelfRenderer?.contents
                     ?: contents?.musicShelfRenderer?.contents
 
+            val continuation =
+                contents?.musicPlaylistShelfRenderer?.continuations?.getContinuation()
+                    ?: contents?.musicShelfRenderer?.continuations?.getContinuation()
+
             // Parse musicResponsiveListItemRenderer (standard playlist format)
-            shelfContents
+            val episodes = shelfContents
                 ?.mapNotNull { it.musicResponsiveListItemRenderer }
                 ?.mapNotNull { renderer ->
                     val videoId = renderer.videoId ?: return@mapNotNull null
@@ -2910,6 +2936,8 @@ object YouTube {
                         isEpisode = true,
                     )
                 } ?: emptyList()
+
+            episodes to continuation
         }
 
     /**
