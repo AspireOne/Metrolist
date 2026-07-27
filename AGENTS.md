@@ -42,6 +42,8 @@ context in them was expensive to rediscover. Skip the ones unrelated to the task
 | Document | Covers |
 |---|---|
 | `docs/discord-integration.md` | Discord Rich Presence: OAuth, the gateway client, and the connection-lifecycle invariants |
+| `docs/playlist-pagination.md` | Online playlist paging: display state, whole-playlist operations, and the resolver boundary |
+| `docs/stream-resolution-and-caching.md` | The playback resolver, the player cache, and why a partially cached song must not be served as a bounded read |
 
 When you solve something in an area that cost real effort to work out — a non-obvious constraint,
 a bug whose cause was hard to see, a design that looks wrong but isn't — add or update a document

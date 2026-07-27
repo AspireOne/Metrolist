@@ -3809,6 +3809,13 @@ class MusicService :
                         else -> CHUNK_LENGTH // contentLength unknown yet — fall back to old probe size
                     }
 
+                // TODO: a song that was never played to the end misses both caches entirely and
+                // pays a full stream resolve (~950ms warm, seconds cold) before the first sample,
+                // because requiredLength is the whole remainder. Do NOT "fix" this by bounding the
+                // returned spec to the cached run — ProgressiveMediaPeriod reads the bounded EOF as
+                // end of stream and the song dies silently mid-track (shipped once, reverted). The
+                // fix is to resolve off the critical path into songUrlCache so the branch below
+                // hits with a real URL. See docs/stream-resolution-and-caching.md.
                 if (downloadCache.isCached(mediaId, dataSpec.position, requiredLength)) {
                     recoverSongDeduped(mediaId)
                     return@Factory dataSpec
