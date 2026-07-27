@@ -1,7 +1,9 @@
 package com.metrolist.innertube.utils
 
 import com.metrolist.innertube.YouTube
+import com.metrolist.innertube.models.SongItem
 import com.metrolist.innertube.pages.LibraryPage
+import com.metrolist.innertube.pages.PlaylistContinuationPage
 import com.metrolist.innertube.pages.PlaylistPage
 import timber.log.Timber
 import java.security.MessageDigest
@@ -41,6 +43,66 @@ suspend fun Result<PlaylistPage>.completed(): Result<PlaylistPage> = runCatching
         songsContinuation = null,
         continuation = page.continuation
     )
+}
+
+/**
+ * Every page of a playlist, or a failure.
+ *
+ * [completed] is best-effort: it yields whatever it managed to collect, reporting success even
+ * when a continuation request failed, the continuations looped, or its request limit was reached.
+ * That suits syncing, where a short read is retried on the next pass, but not actions that treat
+ * the result as the whole playlist — exporting it, downloading it, copying it into the library —
+ * where a silently truncated list is worse than no list at all.
+ *
+ * Fails on a failed request, on a repeated continuation token, and on exceeding [maxRequests]
+ * pages, rather than returning a prefix.
+ */
+suspend fun Result<PlaylistPage>.fullyCompleted(maxRequests: Int = 200): Result<PlaylistPage> = runCatching {
+    val page = getOrThrow()
+    val songs =
+        collectAllPlaylistSongs(
+            initialSongs = page.songs,
+            initialContinuation = page.songsContinuation,
+            maxRequests = maxRequests,
+            fetchContinuation = { YouTube.playlistContinuation(it) },
+        ).getOrThrow()
+
+    PlaylistPage(
+        playlist = page.playlist,
+        songs = songs,
+        songsContinuation = null,
+        continuation = page.continuation,
+    )
+}
+
+/**
+ * Follows a playlist's continuations to the end, or fails.
+ *
+ * Split out from [fullyCompleted] so the paging rules can be exercised without a network.
+ */
+internal suspend fun collectAllPlaylistSongs(
+    initialSongs: List<SongItem>,
+    initialContinuation: String?,
+    maxRequests: Int,
+    fetchContinuation: suspend (String) -> Result<PlaylistContinuationPage>,
+): Result<List<SongItem>> = runCatching {
+    val songs = initialSongs.toMutableList()
+    var continuation = initialContinuation
+    val seenContinuations = mutableSetOf<String>()
+
+    while (continuation != null) {
+        if (!seenContinuations.add(continuation)) {
+            error("Playlist continuation looped after ${songs.size} songs")
+        }
+        if (seenContinuations.size > maxRequests) {
+            error("Playlist exceeded $maxRequests pages after ${songs.size} songs")
+        }
+        val page = fetchContinuation(continuation).getOrThrow()
+        songs += page.songs
+        continuation = page.continuation
+    }
+
+    songs
 }
 
 @JvmName("completedPlaylist")

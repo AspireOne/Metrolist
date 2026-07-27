@@ -21,12 +21,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialogDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalContentColor
@@ -306,6 +308,9 @@ fun TextFieldDialog(
     onDoneMultiple: ((List<String>) -> Unit)? = null,
     onDismiss: () -> Unit,
     autoDismiss: Boolean = true,
+    isBusy: Boolean = false,
+    confirmationEnabled: Boolean = true,
+    dismissEnabled: Boolean = true,
     extraContent: (@Composable () -> Unit)? = null,
 ) {
     val legacyFieldState = remember { mutableStateOf(initialTextFieldValue) }
@@ -320,12 +325,15 @@ fun TextFieldDialog(
     }
 
     DefaultDialog(
-        onDismiss = onDismiss,
+        onDismiss = { if (dismissEnabled) onDismiss() },
         modifier = modifier,
         icon = icon,
         title = title,
         buttons = {
-            TextButton(onClick = onDismiss) {
+            TextButton(
+                onClick = onDismiss,
+                enabled = dismissEnabled,
+            ) {
                 Text(text = stringResource(android.R.string.cancel))
             }
 
@@ -334,7 +342,7 @@ fun TextFieldDialog(
                     ?: isInputValid(legacyFieldState.value.text)
 
             TextButton(
-                enabled = isValid,
+                enabled = isValid && confirmationEnabled && !isBusy,
                 onClick = {
                     if (autoDismiss) onDismiss()
                     if (textFields != null && onDoneMultiple != null) {
@@ -356,6 +364,7 @@ fun TextFieldDialog(
                     TextField(
                         value = value,
                         onValueChange = { onTextFieldsChange?.invoke(index, it) },
+                        enabled = !isBusy,
                         placeholder = { Text(label) },
                         singleLine = singleLine,
                         maxLines = maxLines,
@@ -368,7 +377,7 @@ fun TextFieldDialog(
                         keyboardActions =
                             KeyboardActions(
                                 onDone = {
-                                    if (onDoneMultiple != null) {
+                                    if (onDoneMultiple != null && confirmationEnabled && !isBusy) {
                                         onDoneMultiple(textFields.map { it.second.text })
                                         if (autoDismiss) onDismiss()
                                     }
@@ -396,6 +405,7 @@ fun TextFieldDialog(
                     TextField(
                         value = legacyFieldState.value,
                         onValueChange = { legacyFieldState.value = it },
+                        enabled = !isBusy,
                         placeholder = placeholder,
                         singleLine = singleLine,
                         maxLines = maxLines,
@@ -408,8 +418,14 @@ fun TextFieldDialog(
                         keyboardActions =
                             KeyboardActions(
                                 onDone = {
-                                    onDone(legacyFieldState.value.text)
-                                    if (autoDismiss) onDismiss()
+                                    if (
+                                        isInputValid(legacyFieldState.value.text) &&
+                                        confirmationEnabled &&
+                                        !isBusy
+                                    ) {
+                                        onDone(legacyFieldState.value.text)
+                                        if (autoDismiss) onDismiss()
+                                    }
                                 },
                             ),
                         modifier =
@@ -421,6 +437,11 @@ fun TextFieldDialog(
             }
 
             extraContent?.invoke()
+            if (isBusy) {
+                CircularProgressIndicator(
+                    modifier = Modifier.align(Alignment.CenterHorizontally).padding(top = 16.dp).size(24.dp),
+                )
+            }
         }
     }
 }

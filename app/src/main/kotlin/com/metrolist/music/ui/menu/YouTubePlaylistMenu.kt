@@ -60,11 +60,12 @@ import coil3.compose.AsyncImage
 import com.metrolist.innertube.YouTube
 import com.metrolist.innertube.models.PlaylistItem
 import com.metrolist.innertube.models.SongItem
-import com.metrolist.innertube.utils.completed
+import com.metrolist.innertube.utils.fullyCompleted
 import com.metrolist.music.LocalDatabase
 import com.metrolist.music.LocalDownloadUtil
 import com.metrolist.music.LocalListenTogetherManager
 import com.metrolist.music.LocalPlayerConnection
+import com.metrolist.music.LocalSyncUtils
 import com.metrolist.music.R
 import com.metrolist.music.constants.ListThumbnailSize
 import com.metrolist.music.constants.ThumbnailCornerRadius
@@ -96,19 +97,66 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+/**
+ * The playlist's songs in full, or a failure if they could not all be obtained.
+ *
+ * [songs] is whatever the caller has paged in so far, which for a long playlist is only the part
+ * that has been scrolled into view. Acting on that would silently bookmark, export or download a
+ * truncated playlist, so anything short of the complete list is loaded first.
+ *
+ * When the caller owns a partially loaded list it passes [loadAll], which continues from where that
+ * list left off and reports failure. Callers with no list of their own — menus opened from a
+ * playlist item elsewhere in the app — fall back to fetching the playlist from scratch. Note the
+ * two differ in one respect: [loadAll] yields the caller's displayed list, which is deduplicated
+ * and honours the hide-video-songs preference, whereas the fallback yields the playlist as
+ * YouTube returns it.
+ *
+ * Both paths fail rather than hand back a prefix.
+ */
+internal suspend fun resolveAllSongs(
+    playlistId: String,
+    songs: List<SongItem>,
+    songsComplete: Boolean,
+    loadAll: (suspend () -> Result<List<SongItem>>)? = null,
+): Result<List<SongItem>> =
+    when {
+        songsComplete && songs.isNotEmpty() -> Result.success(songs)
+        loadAll != null -> loadAll()
+        else ->
+            withContext(Dispatchers.IO) {
+                YouTube
+                    .playlist(playlistId)
+                    .fullyCompleted()
+                    .map { it.songs }
+            }
+    }
+
+/** Reports that a playlist-wide action was abandoned because the full song list is unavailable. */
+private suspend fun reportIncompletePlaylist(context: android.content.Context) {
+    withContext(Dispatchers.Main) {
+        Toast.makeText(context, R.string.error_load_all_songs, Toast.LENGTH_SHORT).show()
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @SuppressLint("MutableCollectionMutableState")
 @Composable
 fun YouTubePlaylistMenu(
     playlist: PlaylistItem,
     songs: List<SongItem> = emptyList(),
+    /** Whether [songs] is the whole playlist rather than the pages loaded so far. */
+    songsComplete: Boolean = true,
+    /** Loads the rest of [songs] when it is incomplete. See [resolveAllSongs]. */
+    onLoadAllSongs: (suspend () -> Result<List<SongItem>>)? = null,
     coroutineScope: CoroutineScope,
     onDismiss: () -> Unit,
     selectAction: () -> Unit = {},
     canSelect: Boolean = false,
 ) {
     val context = LocalContext.current
+    val loadAllErrorText = stringResource(R.string.error_load_all_songs)
     val database = LocalDatabase.current
+    val syncUtils = LocalSyncUtils.current
     val downloadUtil = LocalDownloadUtil.current
     val playerConnection = LocalPlayerConnection.current ?: return
     val listenTogetherManager = LocalListenTogetherManager.current
@@ -119,6 +167,8 @@ fun YouTubePlaylistMenu(
     var showChoosePlaylistDialog by rememberSaveable { mutableStateOf(false) }
     var showImportPlaylistDialog by rememberSaveable { mutableStateOf(false) }
     var showErrorPlaylistAddDialog by rememberSaveable { mutableStateOf(false) }
+    val bookmarkingBrowseIds by syncUtils.bookmarkingBrowseIds.collectAsStateWithLifecycle()
+    val isBookmarking = playlist.id in bookmarkingBrowseIds
 
     val notAddedList by remember {
         mutableStateOf(mutableListOf<MediaMetadata>())
@@ -126,30 +176,21 @@ fun YouTubePlaylistMenu(
 
     AddToPlaylistDialog(
         isVisible = showChoosePlaylistDialog,
-        onGetSong = { targetPlaylist ->
-            val allSongs =
-                songs
-                    .ifEmpty {
-                        YouTube
-                            .playlist(targetPlaylist.id)
-                            .completed()
-                            .getOrNull()
-                            ?.songs
-                            .orEmpty()
-                    }.map {
-                        it.toMediaMetadata()
-                    }
-            database.withTransaction {
-                allSongs.forEach(::insert)
-            }
-            coroutineScope.launch(Dispatchers.IO) {
-                targetPlaylist.playlist.browseId?.let { playlistId ->
-                    YouTube.addPlaylistToPlaylist(playlistId, targetPlaylist.id)
+        onResolveSongs = {
+            resolveAllSongs(playlist.id, songs, songsComplete, onLoadAllSongs)
+                .map { resolved ->
+                    PlaylistAddPayload(
+                        songs = resolved.map { it.toMediaMetadata() },
+                        // A screen-owned loader returns its filtered visible list. A playlist-level
+                        // YouTube add would ignore that filtering and copy hidden videos too, so
+                        // bulk add is only safe for the unfiltered fetch-from-scratch path.
+                        remoteSourcePlaylistId = playlist.id.takeIf { onLoadAllSongs == null },
+                    )
                 }
-            }
-            allSongs.map { it.id }
         },
-        onGetSongIds = {
+        // Only seeds the "already contains these songs" highlighting before a destination is
+        // picked; the authoritative list comes from onResolveSongs once one is.
+        onPreviewSongIds = {
             songs.map { it.id }
         },
         onDismiss = { showChoosePlaylistDialog = false },
@@ -160,68 +201,32 @@ fun YouTubePlaylistMenu(
         trailingContent = {
             if (playlist.id != "LM" && !playlist.isEditable) {
                 IconButton(
+                    enabled = !isBookmarking,
                     onClick = {
-                        val isCurrentlySaved = dbPlaylist?.playlist?.bookmarkedAt != null
-                        if (dbPlaylist?.playlist == null) {
-                            database.transaction {
-                                val playlistEntity =
-                                    PlaylistEntity(
-                                        name = playlist.title,
-                                        browseId = playlist.id,
-                                        thumbnailUrl = playlist.thumbnail,
-                                        isEditable = playlist.isEditable,
-                                        remoteSongCount =
-                                            playlist.songCountText?.let {
-                                                Regex("""\d+""").find(it)?.value?.toIntOrNull()
-                                            },
-                                        playEndpointParams = playlist.playEndpoint?.params,
-                                        shuffleEndpointParams = playlist.shuffleEndpoint?.params,
-                                        radioEndpointParams = playlist.radioEndpoint?.params,
-                                    ).toggleLike()
-                                insert(playlistEntity)
-                            }
-                        } else {
-                            database.transaction {
-                                val currentPlaylist = dbPlaylist!!.playlist
-                                update(currentPlaylist, playlist)
-                                update(currentPlaylist.toggleLike())
-                            }
-                        }
                         coroutineScope.launch(Dispatchers.IO) {
-                            if (!isCurrentlySaved) {
-                                val playlistFull = database.playlistByBrowseId(playlist.id).first()
-                                if (playlistFull != null) {
-                                    val songIds = songs
-                                        .ifEmpty {
-                                            YouTube
-                                                .playlist(playlist.id)
-                                                .completed()
-                                                .getOrNull()
-                                                ?.songs
-                                                .orEmpty()
-                                        }.map { it.toMediaMetadata() }
-                                        .onEach { database.transaction { insert(it) } }
-                                        .map { it.id to it.setVideoId }
-                                    database.addSongsToPlaylist(playlistFull, songIds)
-                                }
-                            }
-                            if (playlist.isPodcast) {
-                                YouTube
-                                    .savePodcast(playlist.id, !isCurrentlySaved)
-                                    .onSuccess {
-                                        timber.log.Timber.d("[PODCAST_SAVE] savePodcast API success for ${playlist.id}")
-                                    }.onFailure { e ->
-                                        timber.log.Timber.e(e, "[PODCAST_SAVE] savePodcast API failed for ${playlist.id}")
-                                        withContext(Dispatchers.Main) {
-                                            android.widget.Toast
-                                                .makeText(
-                                                    context,
-                                                    if (isCurrentlySaved) R.string.error_podcast_unsubscribe else R.string.error_podcast_subscribe,
-                                                    android.widget.Toast.LENGTH_SHORT,
-                                                ).show()
-                                        }
+                            val desired = dbPlaylist?.playlist?.bookmarkedAt == null
+                            syncUtils
+                                .setOnlinePlaylistBookmarked(
+                                    playlist = playlist,
+                                    bookmarked = desired,
+                                    resolveSongs = {
+                                        resolveAllSongs(
+                                            playlist.id,
+                                            songs,
+                                            songsComplete,
+                                            onLoadAllSongs,
+                                        ).map { resolved -> resolved.map { it.toMediaMetadata() } }
+                                    },
+                                ).onFailure { error ->
+                                    withContext(Dispatchers.Main) {
+                                        Toast
+                                            .makeText(
+                                                context,
+                                                error.message ?: loadAllErrorText,
+                                                Toast.LENGTH_SHORT,
+                                            ).show()
                                     }
-                            }
+                                }
                         }
                     },
                 ) {
@@ -255,8 +260,13 @@ fun YouTubePlaylistMenu(
     var downloadState by remember {
         mutableIntStateOf(Download.STATE_STOPPED)
     }
-    LaunchedEffect(songs) {
-        if (songs.isEmpty()) return@LaunchedEffect
+    LaunchedEffect(songs, songsComplete) {
+        // Judging "fully downloaded" from a partial list would report the whole playlist as
+        // downloaded once its first page happens to be.
+        if (songs.isEmpty() || !songsComplete) {
+            downloadState = Download.STATE_STOPPED
+            return@LaunchedEffect
+        }
         downloadUtil.downloads.collect { downloads ->
             downloadState =
                 if (songs.all { downloads[it.id]?.state == Download.STATE_COMPLETED }) {
@@ -300,13 +310,18 @@ fun YouTubePlaylistMenu(
                 TextButton(
                     onClick = {
                         showRemoveDownloadDialog = false
-                        songs.forEach { song ->
-                            DownloadService.sendRemoveDownload(
-                                context,
-                                ExoDownloadService::class.java,
-                                song.id,
-                                false,
-                            )
+                        coroutineScope.launch {
+                            resolveAllSongs(playlist.id, songs, songsComplete, onLoadAllSongs)
+                                .onSuccess { allSongs ->
+                                    allSongs.forEach { song ->
+                                        DownloadService.sendRemoveDownload(
+                                            context,
+                                            ExoDownloadService::class.java,
+                                            song.id,
+                                            false,
+                                        )
+                                    }
+                                }.onFailure { reportIncompletePlaylist(context) }
                         }
                     },
                 ) {
@@ -318,23 +333,9 @@ fun YouTubePlaylistMenu(
 
     ImportPlaylistDialog(
         isVisible = showImportPlaylistDialog,
-        onGetSong = {
-            val allSongs =
-                songs
-                    .ifEmpty {
-                        YouTube
-                            .playlist(playlist.id)
-                            .completed()
-                            .getOrNull()
-                            ?.songs
-                            .orEmpty()
-                    }.map {
-                        it.toMediaMetadata()
-                    }
-            database.withTransaction {
-                allSongs.forEach(::insert)
-            }
-            allSongs.map { it.id }
+        onResolveSongs = {
+            resolveAllSongs(playlist.id, songs, songsComplete, onLoadAllSongs)
+                .map { resolved -> resolved.map { it.toMediaMetadata() } }
         },
         playlistTitle = playlist.title,
         onDismiss = { showImportPlaylistDialog = false },
@@ -490,25 +491,16 @@ fun YouTubePlaylistMenu(
                                 },
                                 onClick = {
                                     coroutineScope.launch {
-                                        songs
-                                            .ifEmpty {
-                                                withContext(Dispatchers.IO) {
-                                                    YouTube
-                                                        .playlist(playlist.id)
-                                                        .completed()
-                                                        .getOrNull()
-                                                        ?.songs
-                                                        .orEmpty()
-                                                }
-                                            }.let { songs ->
+                                        resolveAllSongs(playlist.id, songs, songsComplete, onLoadAllSongs)
+                                            .onSuccess { allSongs ->
                                                 playerConnection.playNext(
-                                                    songs.map {
+                                                    allSongs.map {
                                                         it
                                                             .copy(thumbnail = it.thumbnail.resize(544, 544))
                                                             .toMediaItem()
                                                     },
                                                 )
-                                            }
+                                            }.onFailure { reportIncompletePlaylist(context) }
                                     }
                                     onDismiss()
                                 },
@@ -528,19 +520,10 @@ fun YouTubePlaylistMenu(
                                 },
                                 onClick = {
                                     coroutineScope.launch {
-                                        songs
-                                            .ifEmpty {
-                                                withContext(Dispatchers.IO) {
-                                                    YouTube
-                                                        .playlist(playlist.id)
-                                                        .completed()
-                                                        .getOrNull()
-                                                        ?.songs
-                                                        .orEmpty()
-                                                }
-                                            }.let { songs ->
-                                                playerConnection.addToQueue(songs.map { it.toMediaItem() })
-                                            }
+                                        resolveAllSongs(playlist.id, songs, songsComplete, onLoadAllSongs)
+                                            .onSuccess { allSongs ->
+                                                playerConnection.addToQueue(allSongs.map { it.toMediaItem() })
+                                            }.onFailure { reportIncompletePlaylist(context) }
                                     }
                                     onDismiss()
                                 },
@@ -642,19 +625,24 @@ fun YouTubePlaylistMenu(
                                                 )
                                             },
                                             onClick = {
-                                                songs.forEach { song ->
-                                                    val downloadRequest =
-                                                        DownloadRequest
-                                                            .Builder(song.id, song.id.toUri())
-                                                            .setCustomCacheKey(song.id)
-                                                            .setData(song.title.toByteArray())
-                                                            .build()
-                                                    DownloadService.sendAddDownload(
-                                                        context,
-                                                        ExoDownloadService::class.java,
-                                                        downloadRequest,
-                                                        false,
-                                                    )
+                                                coroutineScope.launch {
+                                                    resolveAllSongs(playlist.id, songs, songsComplete, onLoadAllSongs)
+                                                        .onSuccess { allSongs ->
+                                                            allSongs.forEach { song ->
+                                                                val downloadRequest =
+                                                                    DownloadRequest
+                                                                        .Builder(song.id, song.id.toUri())
+                                                                        .setCustomCacheKey(song.id)
+                                                                        .setData(song.title.toByteArray())
+                                                                        .build()
+                                                                DownloadService.sendAddDownload(
+                                                                    context,
+                                                                    ExoDownloadService::class.java,
+                                                                    downloadRequest,
+                                                                    false,
+                                                                )
+                                                            }
+                                                        }.onFailure { reportIncompletePlaylist(context) }
                                                 }
                                             },
                                         )
@@ -724,18 +712,11 @@ fun YouTubePlaylistMenu(
             onShare = { format ->
                 coroutineScope.launch {
                     val ytSongs =
-                        if (songs.isEmpty()) {
-                            withContext(Dispatchers.IO) {
-                                YouTube
-                                    .playlist(playlist.id)
-                                    .completed()
-                                    .getOrNull()
-                                    ?.songs
-                                    .orEmpty()
+                        resolveAllSongs(playlist.id, songs, songsComplete, onLoadAllSongs)
+                            .getOrElse {
+                                reportIncompletePlaylist(context)
+                                return@launch
                             }
-                        } else {
-                            songs
-                        }
 
                     val result =
                         when (format) {
@@ -757,18 +738,11 @@ fun YouTubePlaylistMenu(
             onSave = { format ->
                 coroutineScope.launch {
                     val ytSongs =
-                        if (songs.isEmpty()) {
-                            withContext(Dispatchers.IO) {
-                                YouTube
-                                    .playlist(playlist.id)
-                                    .completed()
-                                    .getOrNull()
-                                    ?.songs
-                                    .orEmpty()
+                        resolveAllSongs(playlist.id, songs, songsComplete, onLoadAllSongs)
+                            .getOrElse {
+                                reportIncompletePlaylist(context)
+                                return@launch
                             }
-                        } else {
-                            songs
-                        }
 
                     val export =
                         when (format) {

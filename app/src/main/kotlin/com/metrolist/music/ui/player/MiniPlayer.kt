@@ -124,6 +124,7 @@ import kotlinx.coroutines.withContext
 import com.metrolist.music.ui.theme.PlayerColorExtractor
 import com.metrolist.music.ui.component.LocalMenuState
 import com.metrolist.music.ui.menu.AddToPlaylistDialog
+import com.metrolist.music.ui.menu.PlaylistAddPayload
 
 /**
  * Stable wrapper for progress state - reads values only during draw phase
@@ -488,7 +489,10 @@ private fun NewMiniPlayer(
                             menuState.show {
                                 AddToPlaylistDialog(
                                     isVisible = true,
-                                    onGetSong = { listOf(metadata.id) },
+                                    onResolveSongs = {
+                                        Result.success(PlaylistAddPayload(songs = listOf(metadata)))
+                                    },
+                                    onPreviewSongIds = { listOf(metadata.id) },
                                     onDismiss = menuState::dismiss,
                                 )
                             }

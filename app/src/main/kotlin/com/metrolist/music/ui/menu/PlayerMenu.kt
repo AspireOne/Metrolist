@@ -171,16 +171,10 @@ fun PlayerMenu(
 
     AddToPlaylistDialog(
         isVisible = showChoosePlaylistDialog,
-        onGetSong = { playlist ->
-            database.withTransaction {
-                insert(mediaMetadata)
-            }
-            coroutineScope.launch(Dispatchers.IO) {
-                playlist.playlist.browseId?.let { YouTube.addToPlaylist(it, mediaMetadata.id) }
-            }
-            listOf(mediaMetadata.id)
+        onResolveSongs = {
+            Result.success(PlaylistAddPayload(songs = listOf(mediaMetadata)))
         },
-        onGetSongIds = { listOf(mediaMetadata.id) },
+        onPreviewSongIds = { listOf(mediaMetadata.id) },
         onDismiss = {
             showChoosePlaylistDialog = false
         },
