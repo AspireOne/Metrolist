@@ -112,14 +112,14 @@ class OnlinePlaylistViewModel @Inject constructor(
     val loadAllError = _loadAllError.asStateFlow()
 
     /**
-     * Incremented after every page that is successfully fetched.
+     * Incremented after a scroll-driven page succeeds and load-more admission has been released.
      *
      * The list is deduplicated and filtered, so a page can arrive without the visible list growing.
-     * This gives the screen something that always changes, so scroll-driven paging can re-evaluate
-     * after each page instead of stalling when a page adds nothing visible.
+     * This gives the screen a safe completion signal for deciding whether the footer still needs
+     * another page.
      */
-    private val _pagesLoaded = MutableStateFlow(0)
-    val pagesLoaded = _pagesLoaded.asStateFlow()
+    private val _loadMoreGeneration = MutableStateFlow(0)
+    val loadMoreGeneration = _loadMoreGeneration.asStateFlow()
 
     val dbPlaylist = database.playlistByBrowseId(playlistId)
         .stateIn(viewModelScope, SharingStarted.Lazily, null)
@@ -142,7 +142,6 @@ class OnlinePlaylistViewModel @Inject constructor(
             _error.value = null
             _loadAllError.value = null
             _allSongsLoaded.value = false
-            _pagesLoaded.value = 0
             // Under the lock so an in-flight page cannot write its continuation back after the
             // reset and resurrect the previous load.
             loadMutex.withLock {
@@ -230,7 +229,6 @@ class OnlinePlaylistViewModel @Inject constructor(
                 replaceRawSongs(playlistPage.songs)
                 continuation = playlistPage.songsContinuation
                 _allSongsLoaded.value = continuation == null
-                _pagesLoaded.value = 1
                 _isLoading.value = false
             }.onFailure { throwable ->
                 _error.value = throwable.message ?: "Failed to load playlist"
@@ -318,7 +316,6 @@ class OnlinePlaylistViewModel @Inject constructor(
                 replaceRawSongs(currentSongs)
                 continuation = page.continuation
                 _allSongsLoaded.value = continuation == null
-                _pagesLoaded.value++
                 outcome = if (continuation == null) PageOutcome.COMPLETE else PageOutcome.FETCHED
             }.onFailure { throwable ->
                 reportException(throwable)
@@ -329,17 +326,20 @@ class OnlinePlaylistViewModel @Inject constructor(
 
     /** Fetches the next page as the user scrolls towards the end of the list. */
     fun loadMoreSongs() {
-        if (_isLoadingMore.value || _isLoadingAll.value || continuation == null) return
+        if (_isLoadingAll.value || continuation == null || !_isLoadingMore.compareAndSet(false, true)) return
 
         viewModelScope.launch(Dispatchers.IO) {
-            _isLoadingMore.value = true
-            try {
-                loadMutex.withLock {
-                    _loadAllError.value = null
-                    fetchNextPage()
+            val outcome =
+                try {
+                    loadMutex.withLock {
+                        _loadAllError.value = null
+                        fetchNextPage()
+                    }
+                } finally {
+                    _isLoadingMore.value = false
                 }
-            } finally {
-                _isLoadingMore.value = false
+            if (outcome == PageOutcome.FETCHED) {
+                _loadMoreGeneration.value++
             }
         }
     }

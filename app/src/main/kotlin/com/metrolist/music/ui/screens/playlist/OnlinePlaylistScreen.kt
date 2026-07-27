@@ -151,7 +151,7 @@ fun OnlinePlaylistScreen(
     val rawSongsLoadedDuration by viewModel.rawSongsLoadedDuration.collectAsStateWithLifecycle()
     val allSongsLoaded by viewModel.allSongsLoaded.collectAsStateWithLifecycle()
     val loadAllError by viewModel.loadAllError.collectAsStateWithLifecycle()
-    val pagesLoaded by viewModel.pagesLoaded.collectAsStateWithLifecycle()
+    val loadMoreGeneration by viewModel.loadMoreGeneration.collectAsStateWithLifecycle()
     val loadAllSongs: suspend () -> Result<List<SongItem>> = remember(viewModel) { viewModel::awaitAllSongs }
 
     val hideExplicit by rememberPreference(key = HideExplicitKey, defaultValue = false)
@@ -208,11 +208,11 @@ fun OnlinePlaylistScreen(
         }
     }
 
-    // Keyed on pagesLoaded so this re-evaluates after every fetched page, not only when the
-    // footer's visibility flips. A page can arrive without the visible list growing — every song
-    // in it a duplicate, or filtered out as a video — which would otherwise leave the footer on
-    // screen with nothing left to trigger the next page. Stops on error; the footer offers a retry.
-    LaunchedEffect(footerVisible, pagesLoaded, allSongsLoaded, loadAllError) {
+    // Keyed on loadMoreGeneration so this re-evaluates after a successful scroll-driven request
+    // has fully released its admission. A page can arrive without the visible list growing — every
+    // song in it a duplicate, or filtered out as a video — which would otherwise leave the footer
+    // on screen with nothing left to trigger the next page. Stops on error; the footer offers a retry.
+    LaunchedEffect(footerVisible, loadMoreGeneration, allSongsLoaded, loadAllError) {
         if (footerVisible && !allSongsLoaded && loadAllError == null) {
             viewModel.loadMoreSongs()
         }
