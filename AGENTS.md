@@ -162,7 +162,8 @@ second. Then confirm it builds: `./gradlew :app:compileFossReleaseKotlin`.
 Small today, but **verify against the diff rather than trusting this list** — it will drift.
 
 - `app/src/main/kotlin/com/metrolist/music/utils/Updater.kt` — `GITHUB_API_BASE` reads
-  `BuildConfig.UPDATE_REPO` instead of hardcoding upstream.
+  `BuildConfig.UPDATE_REPO` instead of hardcoding upstream, and the KMP migration lookup returns
+  no release for fork builds so they never offer an upstream-signed APK as an upgrade.
 - `app/build.gradle.kts` — adds `UPDATE_REPO` `buildConfigField`, `METROLIST_VERSION_NAME` /
   `METROLIST_VERSION_CODE` overrides, and makes a missing `DISCORD_APP_ID` **throw** instead of
   falling back to upstream's app ID. That throw is at Gradle *configuration* time, so every
