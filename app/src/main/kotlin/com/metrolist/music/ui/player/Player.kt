@@ -1139,59 +1139,25 @@ fun BottomSheetPlayer(
                             bottomEnd = 50.dp,
                         )
 
-                    val middleShape = RoundedCornerShape(3.dp)
-
                     // A lone button is a full pill rather than half of a group.
                     val soloShape = RoundedCornerShape(50.dp)
 
-                    // Podcast episodes have no dislike.
+                    // Podcast episodes use the same button for their saved state.
                     val isEpisode = currentSong?.song?.isEpisode == true
 
-                    // Share lives in the overflow menu instead of this row: a third permanent
-                    // segment cost the title 48dp of width, about a quarter of it. The middle slot
-                    // now only exists while lyrics are showing, where it carries the fullscreen
-                    // toggle that used to share a slot with the share button.
-                    val fullscreenSlotShape = if (isEpisode) leadingShape else middleShape
-                    val trailingShape = if (isEpisode && !showInlineLyrics) soloShape else favShape
+                    // Share and dislike live in the overflow menu so the normal player row keeps
+                    // the full song-title width. Lyrics mode still uses a two-button group for
+                    // fullscreen and its contextual menu.
+                    val trailingShape = if (showInlineLyrics) favShape else soloShape
 
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        if (!isEpisode) {
-                            val isDisliked = currentSong?.song?.disliked == true
-                            // Deliberately not wrapped in AnimatedContent, unlike its two
-                            // neighbours: dislike is song state, not view state, so it stays put
-                            // when lyrics or fullscreen are showing.
-                            FilledIconButton(
-                                onClick = playerConnection::toggleDislike,
-                                shape = leadingShape,
-                                colors =
-                                    IconButtonDefaults.filledIconButtonColors(
-                                        containerColor = textButtonColor,
-                                        contentColor = iconButtonColor,
-                                    ),
-                                modifier = Modifier.size(42.dp),
-                            ) {
-                                Icon(
-                                    painter =
-                                        painterResource(
-                                            if (isDisliked) {
-                                                R.drawable.heart_broken
-                                            } else {
-                                                R.drawable.heart_broken_border
-                                            },
-                                        ),
-                                    contentDescription = stringResource(R.string.dislike),
-                                    modifier = Modifier.size(24.dp),
-                                )
-                            }
-                        }
-
                         if (showInlineLyrics) {
                             FilledIconButton(
                                 onClick = { isFullScreen = !isFullScreen },
-                                shape = fullscreenSlotShape,
+                                shape = leadingShape,
                                 colors =
                                     IconButtonDefaults.filledIconButtonColors(
                                         containerColor = textButtonColor,

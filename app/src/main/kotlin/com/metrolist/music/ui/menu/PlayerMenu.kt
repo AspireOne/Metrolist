@@ -401,6 +401,38 @@ fun PlayerMenu(
                                 context.startActivity(Intent.createChooser(intent, null))
                             },
                         ),
+                        if (!mediaMetadata.isEpisode) {
+                            NewAction(
+                                icon = {
+                                    val isDisliked = librarySong?.song?.disliked == true
+                                    Icon(
+                                        painter =
+                                            painterResource(
+                                                if (isDisliked) {
+                                                    R.drawable.heart_broken
+                                                } else {
+                                                    R.drawable.heart_broken_border
+                                                },
+                                            ),
+                                        contentDescription = null,
+                                        modifier = Modifier.size(32.dp),
+                                        tint =
+                                            if (isDisliked) {
+                                                MaterialTheme.colorScheme.error
+                                            } else {
+                                                MaterialTheme.colorScheme.onSurfaceVariant
+                                            },
+                                    )
+                                },
+                                text = stringResource(R.string.dislike),
+                                onClick = {
+                                    playerConnection.toggleDislike()
+                                    onDismiss()
+                                },
+                            )
+                        } else {
+                            null
+                        },
                     ),
                 columns = if (isListenTogetherGuest) 2 else 3,
                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 16.dp),
