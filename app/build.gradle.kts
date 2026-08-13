@@ -103,8 +103,8 @@ android {
         applicationId = applicationIdOverride ?: baseApplicationId
         minSdk = 26
         targetSdk = 36
-        versionCode = 150
-        versionName = "13.6.1"
+        versionCode = 152
+        versionName = "13.6.3"
         resValue("string", "app_name", appNameOverride ?: "Metrolist")
         // Exposed to resources (e.g. static shortcuts' targetPackage) so they follow the
         // fork's applicationId. Overridden in the debug build type to include its suffix.
