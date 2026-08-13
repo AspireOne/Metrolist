@@ -194,8 +194,10 @@ object Updater {
     /**
      * Returns the newest KMP release that provides the migration APK.
      */
-    suspend fun getLatestKmpRelease(): Result<ReleaseInfo?> =
-        withContext(Dispatchers.IO) {
+    suspend fun getLatestKmpRelease(): Result<ReleaseInfo?> {
+        if (BuildConfig.UPDATE_REPO != "MetrolistGroup/Metrolist") return Result.success(null)
+
+        return withContext(Dispatchers.IO) {
             runCatching {
                 val releases = JSONArray(client.get(KMP_RELEASES_URL).bodyAsText())
 
@@ -217,6 +219,7 @@ object Updater {
                 null
             }
         }
+    }
 
     /**
      * Get the download URL for the correct app variant
