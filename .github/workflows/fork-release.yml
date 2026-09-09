@@ -116,7 +116,9 @@ jobs:
             git submodule update --init --recursive
           fi
 
-          VERSION=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts)
+          # The build script also derives a suffixed version from the base name later on;
+          # keep only the first assignment so the output remains a single version string.
+          VERSION=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts | head -n 1)
           if [[ ! "$VERSION" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
             echo "::error::Upstream versionName is not a single dotted numeric version."
             exit 1
