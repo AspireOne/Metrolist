@@ -5,6 +5,8 @@
 
 package com.metrolist.music.ui.menu
 
+import com.metrolist.innertube.utils.completed
+
 import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.res.Configuration
@@ -52,16 +54,14 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
-import androidx.core.net.toUri
 import androidx.media3.exoplayer.offline.Download
-import androidx.media3.exoplayer.offline.DownloadRequest
 import androidx.media3.exoplayer.offline.DownloadService
 import coil3.compose.AsyncImage
 import com.metrolist.innertube.YouTube
 import com.metrolist.innertube.models.PlaylistItem
 import com.metrolist.innertube.models.SongItem
-import com.metrolist.innertube.utils.fullyCompleted
 import com.metrolist.music.LocalDatabase
+import com.metrolist.music.LocalArtistNameAliases
 import com.metrolist.music.LocalDownloadUtil
 import com.metrolist.music.LocalListenTogetherManager
 import com.metrolist.music.LocalPlayerConnection
@@ -85,6 +85,7 @@ import com.metrolist.music.ui.component.NewAction
 import com.metrolist.music.ui.component.NewActionGrid
 import com.metrolist.music.ui.component.YouTubeListItem
 import com.metrolist.music.ui.utils.resize
+import com.metrolist.music.utils.ArtistNameAliases
 import com.metrolist.music.utils.exportYouTubePlaylistAsCSV
 import com.metrolist.music.utils.exportYouTubePlaylistAsM3U
 import com.metrolist.music.utils.getExportFileUri
@@ -126,7 +127,7 @@ internal suspend fun resolveAllSongs(
             withContext(Dispatchers.IO) {
                 YouTube
                     .playlist(playlistId)
-                    .fullyCompleted()
+                    .completed()
                     .map { it.songs }
             }
     }
@@ -163,6 +164,7 @@ fun YouTubePlaylistMenu(
     val isGuest = listenTogetherManager?.isInRoom == true && !listenTogetherManager.isHost
     val dbPlaylist by database.playlistByBrowseId(playlist.id).collectAsStateWithLifecycle(initialValue = null)
     val isPinned by database.speedDialDao.isPinned(playlist.id).collectAsStateWithLifecycle(initialValue = false)
+    val artistNameAliases = LocalArtistNameAliases.current
 
     var showChoosePlaylistDialog by rememberSaveable { mutableStateOf(false) }
     var showImportPlaylistDialog by rememberSaveable { mutableStateOf(false) }
@@ -350,7 +352,7 @@ fun YouTubePlaylistMenu(
         ) {
             item {
                 ListItem(
-                    headlineContent = { Text(text = stringResource(R.string.already_in_playlist)) },
+                    content = { Text(text = stringResource(R.string.already_in_playlist)) },
                     leadingContent = {
                         Image(
                             painter = painterResource(R.drawable.close),
@@ -365,7 +367,7 @@ fun YouTubePlaylistMenu(
 
             items(notAddedList) { song ->
                 ListItem(
-                    headlineContent = { Text(text = song.title) },
+                    content = { Text(text = song.title) },
                     leadingContent = {
                         Box(
                             contentAlignment = Alignment.Center,
@@ -385,7 +387,9 @@ fun YouTubePlaylistMenu(
                         Text(
                             text =
                                 joinByBullet(
-                                    song.artists.joinToString { it.name },
+                                    song.artists.joinToString {
+                                        ArtistNameAliases.resolve(artistNameAliases, it.id, it.name)
+                                    },
                                     makeTimeString(song.duration * 1000L),
                                 ),
                         )
@@ -628,20 +632,7 @@ fun YouTubePlaylistMenu(
                                                 coroutineScope.launch {
                                                     resolveAllSongs(playlist.id, songs, songsComplete, onLoadAllSongs)
                                                         .onSuccess { allSongs ->
-                                                            allSongs.forEach { song ->
-                                                                val downloadRequest =
-                                                                    DownloadRequest
-                                                                        .Builder(song.id, song.id.toUri())
-                                                                        .setCustomCacheKey(song.id)
-                                                                        .setData(song.title.toByteArray())
-                                                                        .build()
-                                                                DownloadService.sendAddDownload(
-                                                                    context,
-                                                                    ExoDownloadService::class.java,
-                                                                    downloadRequest,
-                                                                    false,
-                                                                )
-                                                            }
+                                                            allSongs.forEach { downloadUtil.download(it) }
                                                         }.onFailure { reportIncompletePlaylist(context) }
                                                 }
                                             },

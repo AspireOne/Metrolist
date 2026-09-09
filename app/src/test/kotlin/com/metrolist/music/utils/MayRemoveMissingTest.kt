@@ -5,8 +5,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Covers [mayRemoveMissing], the gate in front of every sync that deletes local state a remote list
- * omits.
+ * Covers [mayRemoveMissing], retained for liked-song and podcast deletion guards.
  *
  * Both conditions have caused real data loss when absent: an incomplete read un-liked thousands of
  * songs that were only missing from a truncated page, and an empty read cannot be told apart from a

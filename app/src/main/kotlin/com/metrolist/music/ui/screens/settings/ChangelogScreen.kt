@@ -51,7 +51,7 @@ fun ChangelogScreen(
             releases = allReleases.filter { release ->
                 // Compare the numeric versionName (release title), not tagName -- our fork
                 // tags are prefixed "fork-v..." which compareVersions would parse as 0.
-                Updater.compareVersions(BuildConfig.VERSION_NAME, release.versionName) >= 0
+                Updater.compareVersions(BuildConfig.BASE_VERSION_NAME, release.versionName) >= 0
             }
             isLoading = false
         }.onFailure {
@@ -59,9 +59,7 @@ fun ChangelogScreen(
         }
     }
 
-    val sheetState = rememberModalBottomSheetState(
-        skipPartiallyExpanded = false
-    )
+    val sheetState = rememberBottomSheetState(initialValue = SheetValue.Hidden)
 
     val showFab by remember {
         derivedStateOf { sheetState.targetValue != SheetValue.Hidden }

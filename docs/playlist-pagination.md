@@ -42,20 +42,29 @@ must produce no local or remote mutation.
 `AddToPlaylistDialog` admits one destination at a time and binds the destination, resolved payload,
 and duplicate set in one immutable pending operation. Once the user accepts that operation it is
 handed to `SyncUtils`'s application-owned scope, so dismissing the composable cannot interrupt it.
-Local metadata and mappings commit in one transaction. The remote side then uses either one
-playlist-level bulk request or per-song requests, never both.
+Local metadata and mappings commit in one transaction, honoring upstream's beginning/end insertion
+preference. Duplicate lookups use upstream's batched queries to stay within SQLite parameter limits.
+The remote side then uses either one playlist-level bulk request or per-song requests, never both.
 
 Per-song remote edits isolate failures. One song's rejected edit — a deleted, private, or
 region-blocked video, or a server error, none of which the InnerTube layer retries — must not
-prevent the songs behind it from being attempted, because every song in the batch was already
-committed locally and `executeSyncPlaylist` rebuilds the local list from the remote one. A song that
-was never attempted is a song the next sync deletes. Every song is therefore attempted, the residue
+prevent the songs behind it from being attempted. Every song is attempted, the residue
 is retried once as a whole second pass (skipped when the device is offline, where it would only
 double a hopeless batch), and whatever still fails is logged and reported as one aggregate. The
 bulk path has nothing to isolate and reports the whole batch on failure. Cancellation propagates
 instead of being recorded as a failure, so it is never reported as one.
 
 Failed remote edits do not roll back the local rows, per the optimistic local-first policy below.
+Upstream v13.7.0 reconciliation also preserves local playlist occurrences absent from the remote list.
+
+## Upstream pagination integration
+
+As of v13.7.0, upstream's `completed()` fails on continuation errors, repeated tokens, and its
+50-request limit. It replaces this fork's `fullyCompleted` and `drained` implementations. Library
+sync now uses upstream's retry handling, artist repairs, and liked-date preservation. Failed paging
+aborts that sync instead of applying a partial prefix; larger lists hitting the limit remain unsynced.
+The screen's incremental paging remains separate and whole-playlist actions still fail rather than
+use a prefix. Empty-result deletion guards and podcast continuation guards remain fork additions.
 
 `ImportPlaylistDialog` also resolves first. Playlist creation, metadata insertion, and mappings are
 one transaction, so continuation failure cannot leave an empty ghost playlist. A successfully

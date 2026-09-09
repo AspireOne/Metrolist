@@ -168,31 +168,24 @@ Small today, but **verify against the diff rather than trusting this list** — 
   `METROLIST_VERSION_CODE` overrides, and makes a missing `DISCORD_APP_ID` **throw** instead of
   falling back to upstream's app ID. That throw is at Gradle *configuration* time, so every
   `gradlew` invocation needs the variable — including test-only ones.
-- `.gitattributes` — `merge=ours` on `.github/workflows/**`.
 - Fork-only files with no upstream counterpart: `fork-release.yml`, `keepalive.yml`,
   `.github/scripts/failed_tests.py`, this file.
 
 ## Toolchain
 
-- **JDK 21** required (Temurin). Kotlin 2.4.10, AGP 9.3.0, KSP.
+- **JDK 21** required (Temurin). Kotlin 2.4.10, AGP 9.3.1, KSP.
 - `compileSdk = 37`, `minSdk = 26`, `targetSdk = 36`. JVM toolchain pinned to 21.
 - No ktlint / detekt / spotless. Lint is the only static check and is non-blocking: `abortOnError = false`, `warningsAsErrors = false` (`app/build.gradle.kts:231-236`).
 - The active lint config is `app/lint.xml` (loaded via `lintConfig = file("lint.xml")` in the android block): ignores `MissingTranslation`, escalates `MissingQuantity` to error for `cs`/`lt`/`sk` locales. The repo-root `lint.xml` (which holds the media3 `UnstableApi` ignore) is **not** wired into the Gradle lint task — edit `app/lint.xml` to change lint behavior.
 - `org.gradle.unsafe.configuration-cache=true` — be aware config cache is on; some plugins break.
-- `org.gradle.caching=false` intentionally (works around NewPipeExtractor SNAPSHOT timeouts).
+- `org.gradle.caching=true` follows upstream; task caching is independent of dependency downloads.
 
 ## First-time setup
 
-Before building, **initialize the `metroproto` submodule** or proto generation silently no-ops:
-
-```bash
-git submodule update --init --recursive
-```
-
-Protobuf codegen for the Listen Together feature:
-- `metroproto/listentogether.proto` is the source; generated Kotlin/Java land in `app/src/main/java/com/metrolist/music/listentogether/proto/` (gitignored).
-- The Gradle `generateProto` task runs automatically before `compile*` / `assemble*` and **downloads `protoc` to `app/build/` if missing** (`app/build.gradle.kts:40-304`). You rarely need `app/generate_proto.sh` manually.
-- If `metroproto/listentogether.proto` is absent (submodule not initialized), the build warns and skips — code that references generated proto types will then fail to compile.
+Listen Together protobuf sources live in `app/src/main/proto/listentogether.proto`.
+The protobuf Gradle plugin downloads protoc and generates Java/Kotlin lite sources in `app/build/`.
+The old `metroproto` submodule and custom generation task were removed in v13.7.0.
+`cleanLegacyProtoSources` removes obsolete generated sources from `app/src/main/java/` before builds.
 
 Debug signing: `app/persistent-debug.keystore` (gitignored). If absent, create it per `development_guide.md`:
 
@@ -224,21 +217,17 @@ Tests are **JUnit4 + Robolectric** (`@Config(sdk = [33])`), unit-test JVM only �
 
 ## Module layout
 
-Root `settings.gradle.kts` includes the `:app` plus seven Android-library modules. Each library is a Ktor-based API client:
+Root `settings.gradle.kts` includes `:app` and `:innertube`.
 
-- `:innertube` — YouTube Music API (the core data source).
-- `:kugou`, `:lrclib`, `:betterlyrics` — lyrics providers.
-- `:lastfm` — Last.fm scrobble API.
-- `:shazamkit` — music recognition.
-- `:paxsenix` — Apple Music lyrics/search API client (reuses `betterlyrics`'s `TTMLParser`).
-- `metroproto/` — **git submodule** (not a Gradle module); holds `listentogether.proto`.
+- `:innertube` wraps the InnerTubeX API dependency (`com.github.MetrolistGroup.innertubex`).
+- Lyrics providers and Last.fm now live inside `:app`; their former standalone modules were removed.
+- Listen Together's protocol source is `app/src/main/proto/listentogether.proto`.
 
 `:app` (namespace `com.metrolist.music`) is the real application. Key entrypoints:
 - `App.kt` — `@HiltAndroidApp` `Application`, Coil `ImageLoader` factory, startup wiring.
 - `MainActivity.kt` — single Compose activity.
 - `playback/MusicService.kt` — Media3 `MediaLibraryService` (foreground playback).
 - `di/` — Hilt modules; `di/Qualifiers.kt` defines `@ApplicationScope`.
-- `com/dpi/*` — `ContentProvider`s used to hook early init, **not** for content.
 
 ## Build flags / environment
 
@@ -251,11 +240,12 @@ Root `settings.gradle.kts` includes the `:app` plus seven Android-library module
 ## Gotchas
 
 - `org.json:json` is **globally excluded** (`app/build.gradle.kts:331-333`). The standalone artefact bundles an Apache Harmony `JSONArray` with an internal `myArrayList` field absent from Android's platform `org.json`; R8 inlines against it and crashes with `NoSuchFieldError` at runtime. Don't re-add it.
-- `app/src/main/assets/player_configs.json` and `player_dates.json` are auto-synced from `ZemerTeam/zemer-cipher` by `.github/workflows/sync-player-configs.yml` upstream — but **that workflow remains disabled with the other upstream workflows in this fork**. These files therefore only update when a mirror merge brings upstream's committed version across. Don't hand-edit them.
+- Playback uses upstream's InnerTubeX integration. The old bundled player config/date assets and
+  custom cipher resolver were removed in v13.7.0.
 - `dataStore.get(key)` / `dataStore[key]` do `runBlocking(Dispatchers.IO)` internally — every call is a blocking disk read on the calling thread. `MusicService.onCreate` therefore reads **all** startup preferences once into `startupPrefs` (`runBlocking { dataStore.data.first() }`) and everything after that point must read `startupPrefs!![Key] ?: default`. Adding a `dataStore.get()` back into `onCreate` silently re-introduces a main-thread disk read into the most ANR-sensitive method in the app; ~15 of them were deliberately consolidated away. Outside `onCreate` (in coroutines, callbacks, settings screens) `dataStore.get()` is fine.
 - Unit tests drive coroutine scopes with `Dispatchers.Unconfined`, so a `launch` body starts **inline on the calling thread** instead of being dispatched. Any bug whose trigger is dispatch latency or coroutine start ordering is therefore invisible to the test suite even when the test looks like it covers the code. A real example: a heartbeat liveness check compared two `System.currentTimeMillis()` reads taken either side of a `start()`; under `Unconfined` they always landed in the same millisecond and passed, while production (`Dispatchers.IO`) crossed a millisecond boundary often enough to kill healthy connections. When reasoning about ordering, check what dispatcher production actually uses — do not infer safety from green tests.
-- Generated proto sources are gitignored; never edit `app/src/main/java/com/metrolist/music/listentogether/proto/*` by hand. Edit the `.proto` in the `metroproto` submodule.
-- All library modules already set `isCoreLibraryDesugaringEnabled = true` and target Java 21; new modules should match.
+- Generated proto sources are build outputs; edit `app/src/main/proto/listentogether.proto`, never generated Java/Kotlin.
+- `:innertube` enables core library desugaring and targets Java 21; any new modules should match.
 
 ## Commit conventions
 
